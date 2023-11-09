@@ -11,10 +11,10 @@ function App() {
   // setPostTitles(titles);
 
   return (
-    <div class="post-list">
+    <div className="post-list">
       <h3>List of posts:</h3>
       {postTitles.map((title) => (
-        <Post key={title.id} post={title} />
+        <Post key={title} post={title} />
       ))}
     </div>
   );
