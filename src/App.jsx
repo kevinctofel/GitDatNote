@@ -19,6 +19,9 @@ function App() {
 
   return (
     <div className="App">
+      <button className="NewPost" type="button" value="New">
+        New
+      </button>
       <h3>Posts</h3>
       <ul className="PostTitlesList">
         {postTitles.map((item, index) => (

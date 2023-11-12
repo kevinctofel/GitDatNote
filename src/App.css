@@ -54,6 +54,12 @@
   overflow-y: scroll;
   padding-left: 0%;
   margin-top: 0;
-  
+}
+
+.NewPost{
+  color: #5E81AC;
+  height: 25px;
+  width: 50px;
+  font-size: 10px;
 }
 
