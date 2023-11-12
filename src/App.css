@@ -41,11 +41,16 @@
   color: #888;
 }
 
-.post-list {
+.PostTitlesList{
   display: inline-block;
   text-align: left;
   border-style: solid;
   border-width:thin;
   border-color: #888;
+  scrollbar-color: #fff;
+  height: 100px;
+  width: 150px;
+  overflow-y: scroll;
+  
 }
 

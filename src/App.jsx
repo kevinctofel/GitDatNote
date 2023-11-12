@@ -1,21 +1,30 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import "./App.css";
 import getPostTitles from "./components/getPostTitles";
 import Post from "./components/Post";
+// import { get } from "http";
 let postTitles = await getPostTitles();
+let titles = [];
+
+const handleCallback = () => {
+  this.setState({ data: postTitles });
+};
 
 function App() {
-  // const [postTitles, setPostTitles] = useState([]);
+  const [postTitles, setPostTitles] = useState([]);
 
-  // console.log(postTitles);
-  // setPostTitles(titles);
+  useEffect(() => {
+    getPostTitles().then((response) => setPostTitles(response));
+  }, []);
 
   return (
-    <div className="post-list">
-      <h3>List of posts:</h3>
-      {postTitles.map((title) => (
-        <Post key={title} post={title} />
-      ))}
+    <div className="App">
+      <h1>Posts</h1>
+      <ul className="PostTitlesList">
+        {postTitles.map((item, index) => (
+          <div key={index}>{item}</div>
+        ))}
+      </ul>
     </div>
   );
 }
