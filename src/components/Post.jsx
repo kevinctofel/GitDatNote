@@ -1,11 +1,6 @@
-const Post = ({ post }) => {
-  // console.log(name);
-  return (
-    <>
-      {post}
-      <br />
-    </>
-  );
+const Post = ({ title }) => {
+  console.log(title);
+  return <div>{title}</div>;
 };
 
 export default Post;

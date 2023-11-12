@@ -2,13 +2,14 @@ import { useState, useEffect } from "react";
 import "./App.css";
 import getPostTitles from "./components/getPostTitles";
 import Post from "./components/Post";
+
 // import { get } from "http";
 let postTitles = await getPostTitles();
 let titles = [];
 
-const handleCallback = () => {
-  this.setState({ data: postTitles });
-};
+// const handleCallback = () => {
+//   this.setState({ data: postTitles });
+// };
 
 function App() {
   const [postTitles, setPostTitles] = useState([]);
@@ -24,8 +25,10 @@ function App() {
       </button>
       <h3>Posts</h3>
       <ul className="PostTitlesList">
-        {postTitles.map((item, index) => (
-          <div key={index}>{item}</div>
+        {postTitles.map((title, index) => (
+          <li key={index}>
+            <Post {...title} />
+          </li>
         ))}
       </ul>
     </div>
