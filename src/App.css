@@ -44,13 +44,16 @@
 .PostTitlesList{
   display: inline-block;
   text-align: left;
+  font-size: small;
   border-style: solid;
   border-width:thin;
   border-color: #888;
   scrollbar-color: #fff;
   height: 100px;
-  width: 150px;
+  width: auto;
   overflow-y: scroll;
+  padding-left: 0%;
+  margin-top: 0;
   
 }
 

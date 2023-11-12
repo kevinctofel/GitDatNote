@@ -19,7 +19,7 @@ function App() {
 
   return (
     <div className="App">
-      <h1>Posts</h1>
+      <h3>Posts</h3>
       <ul className="PostTitlesList">
         {postTitles.map((item, index) => (
           <div key={index}>{item}</div>
