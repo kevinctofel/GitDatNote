@@ -23,7 +23,7 @@ function App() {
       <button className="NewPost" type="button" value="New">
         New
       </button>
-      <h3>Posts</h3>
+      <h3 className = "one">Posts</h3>
       <ul className="PostTitlesList">
         {postTitles.map((title, index) => (
           <li key={index}>
@@ -31,6 +31,7 @@ function App() {
           </li>
         ))}
       </ul>
+      <textarea className="two" name="postText" rows="20" cols="100">Markdown goes here.</textarea>
     </div>
   );
 }
