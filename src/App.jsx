@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
 import "./App.css";
 import getPostTitles from "./components/getPostTitles";
+import newPost from "./components/newPost"
 import Post from "./components/Post";
 
-// import { get } from "http";
-let postTitles = await getPostTitles();
+//:let postTitles = await getPostTitles();
 let titles = [];
 
 // const handleCallback = () => {
@@ -17,6 +17,14 @@ function App() {
   useEffect(() => {
     getPostTitles().then((response) => setPostTitles(response));
   }, []);
+const [postText, setPostText] = useState('Markdown goes here.');
+    const handlePublish = () => {
+    console.log(typeof postText, postText);
+    newPost(postText);
+  };
+  const handleTextAreaChange = (event) => {
+    setPostText(event.target.value);
+  };
 
   return (
     <div className="App">
@@ -31,7 +39,8 @@ function App() {
           </li>
         ))}
       </ul>
-      <textarea className="two" name="postText" rows="20" cols="100">Markdown goes here.</textarea>
+      <textarea type="text" id="postContent" className="two" name="postText" rows="20" cols="50"value={postText} onChange={handleTextAreaChange}>Markdown goes here.</textarea>
+      <button className="Publish" type="button" value = "Publish" onClick={handlePublish}>Publish</button>
     </div>
   );
 }
