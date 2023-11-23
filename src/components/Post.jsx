@@ -1,5 +1,5 @@
 const Post = ({ title }) => {
-  console.log(title);
+//  console.log(title);
   return <div>{title}</div>;
 };
 
