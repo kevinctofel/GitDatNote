@@ -1,14 +1,15 @@
 import { Octokit } from "octokit";
 import App from "../App.jsx"
-async function newPost(postContent) {
+async function newPost(postTitle, postContent) {
+
 const octokit = new Octokit({
     auth: import.meta.env.VITE_GITHUB_TOKEN,
 });
 
-await octokit.request("PUT /repos/{owner}/{repo}/contents/content/blog/CMSPost.md", {
+await octokit.request("PUT /repos/{owner}/{repo}/contents/content/blog/{path}", {
   owner: "kevinctofel",
   repo: "MyConsciousStream",
-  path: "CMSPost.md",
+  path: `${postTitle}.md`,
   message: "new blog post",
   committer: {
     name: "Kevin C. Tofel",

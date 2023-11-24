@@ -3,13 +3,15 @@ import "./App.css";
 import getPostTitles from "./components/getPostTitles";
 import newPost from "./components/newPost"
 import Post from "./components/Post";
-
+import slugify from "slugify";
 //:let postTitles = await getPostTitles();
 // let titles = [];
 
 // const handleCallback = () => {
 //   this.setState({ data: postTitles });
 // };
+// TODO Make title required.
+// TODO Add front matter to new post content.
 
 function App() {
   const [postTitles, setPostTitles] = useState([]);
@@ -23,7 +25,7 @@ function App() {
   const [postTitle, setPostTitle] = useState('');
   const handlePublish = () => {
    // console.log(typeof postText, postText);
-   newPost(postText);
+   newPost(slugify(postTitle), postText);
   };
   const handleTextAreaChange = (event) => {
     setPostText(event.target.value);
