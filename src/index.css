@@ -79,3 +79,6 @@ textarea{
  font-family: 'Lucida Sans', 'Lucida Sans Regular', 'Lucida Grande', 'Lucida Sans Unicode', Geneva, Verdana, sans-serif, system-ui, Avenir, Helvetica, Arial, sans-serif;
 }
 
+div {
+  color: white;
+}
