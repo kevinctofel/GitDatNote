@@ -82,3 +82,7 @@ textarea{
 div {
   color: white;
 }
+
+#title:hover {
+  color: red;
+}

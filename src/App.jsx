@@ -35,6 +35,16 @@ function App() {
     setPostTitle(event.target.value);
   };
 
+  // TODO - Fix this code for populating the post content with
+  // an old post
+  const populateTextArea = (index) => {
+    console.log("old post content");
+    // console.log(title);
+    document.getElementById("postTitle").innerHTML = "Old post title"; 
+    document.getElementById("postContent").innerText = "Old post content."
+  }
+
+
   return (
     <div className="App">
       <button className="NewPost" type="button" value="New" onClick={getPosts}>
@@ -43,8 +53,9 @@ function App() {
       <h3 className="one">Posts</h3>
       <ul className="PostTitlesList">
         {postTitles.map((title, index) => (
-          <li key={index}>
-            <Post {...title} />
+          // TODO Fix this onClick with above function
+          <li onClick={populateTextArea} key={index}>
+            <Post {...title } />
           </li>
         ))}
       </ul>

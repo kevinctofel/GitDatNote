@@ -1,6 +1,7 @@
-const Post = ({ title }) => {
+const Post = ({ title, url }) => {
 //  console.log(title);
-  return <div>{title}</div>;
+  //
+    return <div id="title">{title}</div>;
 };
 
 export default Post;
