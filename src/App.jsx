@@ -3,6 +3,7 @@ import "./App.css";
 import getPostTitles from "./components/getPostTitles";
 import newPost from "./components/newPost";
 import Post from "./components/Post";
+import { marked } from "marked";
 
 //:let postTitles = await getPostTitles();
 // let titles = [];
@@ -15,6 +16,13 @@ import Post from "./components/Post";
 
 function App() {
   const [postTitles, setPostTitles] = useState([]);
+
+  const updatePreview = () => {
+        let previewElement = document.getElementById("postPreview");
+        let editorValue = document.getElementById("postContent").value;
+        let markedUpHTML = marked(editorValue);
+        previewElement.setHTML(markedUpHTML);
+      }
 
   //useEffect(() => {
   const getPosts = () => {
@@ -29,6 +37,7 @@ function App() {
   };
   const handleTextAreaChange = (event) => {
     setPostText(event.target.value);
+    updatePreview();
   };
 
   const handleTitleAreaChange = (event) => {
@@ -41,7 +50,7 @@ function App() {
     console.log("old post content");
     // console.log(title);
     document.getElementById("postTitle").innerHTML = "Old post title"; 
-    document.getElementById("postContent").innerText = "Old post content."
+    document.getElementById("postContent").innerHTML = "Old post content."
   }
 
 
@@ -90,8 +99,19 @@ function App() {
           Publish
         </button>
       </form>
+      <div
+          type="text"
+          id="postPreview"
+          className="two"
+          name="postPreview"
+          rows="20"
+          cols="50"
+          // value=' '
+        > 
+    </div>  
+
     </div>
-  );
+      );
 }
 
 export default App;

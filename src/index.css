@@ -86,3 +86,8 @@ div {
 #title:hover {
   color: red;
 }
+
+#postPreview {
+  border: 1px solid black;
+  background: dark-grey;
+}
