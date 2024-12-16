@@ -11,10 +11,10 @@ async function newPost(postTitle, postContent) {
   let postURL = slugify(postTitle);
 
   await octokit.request(
-    "PUT /repos/{owner}/{repo}/contents/content/blog/{path}",
+    "PUT /repos/{owner}/{repo}/contents/Journal/2024/December/{path}",
     {
       owner: "kevinctofel",
-      repo: "MyConsciousStream",
+      repo: "SecondBrain",
       path: `${postURL}.md`,
       message: "new blog post",
       committer: {

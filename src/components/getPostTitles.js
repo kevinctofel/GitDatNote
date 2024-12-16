@@ -6,19 +6,19 @@ async function getPostTitles() {
   });
 
   let listOfPosts = await octokit.request(
-    "GET /repos/{owner}/{repo}/contents/content/blog/",
+    "GET /repos/{owner}/{repo}/contents/Journal/2024/December/",
     {
       owner: "kevinctofel",
-      repo: "MyConsciousStream",
+      repo: "SecondBrain",
     }
   );
 
   let postInfo = async (title) => {
     let data = await octokit.request(
-      "GET /repos/{owner}/{repo}/contents/content/blog/{file}",
+      "GET /repos/{owner}/{repo}/contents/Journal/2024/December/{file}",
       {
         owner: "kevinctofel",
-        repo: "MyConsciousStream",
+        repo: "SecondBrain",
         file: title,
       }
     );
