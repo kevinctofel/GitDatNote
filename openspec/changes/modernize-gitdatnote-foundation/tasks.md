@@ -1,36 +1,53 @@
 # Tasks: foundation modernization
 
-> Execute in order; do not check off items solely because a model generated code. Each task requires review or test evidence. Future roadmap features are deliberately excluded.
+> Execute in order; do not check off items solely because a model generated code. Each task requires review or test evidence before it may be marked complete. Future roadmap features are deliberately excluded.
+>
+> The source audit is complete in `audit.md`. All architectural decisions are resolved in `design.md`. Completed checkboxes below carry an explicit **Evidence** note naming the artifact that supports them.
 
 ## 1. Inspect and preserve existing behavior
-- [ ] 1.1 Create working feature branch and record initial test/build behavior; do not modify the live SecondBrain repo.
-- [ ] 1.2 Audit current GitDatNote source, `package.json`, env usage, GitHub requests, and hardcoded paths; record observations.
-- [ ] 1.3 Write characterization checks for reusable current behavior; document code to retain/replace.
+- [x] 1.1 Create working feature branch (`feat/gitdatnote-2`) and record the starting commit; do not modify the live SecondBrain repo. **Evidence:** branch `feat/gitdatnote-2` and starting commit `2f3bbef` are recorded in `audit.md` and confirmed by `git log`.
+- [x] 1.2 Audit current GitDatNote source, `package.json`, env usage, GitHub requests, and hardcoded paths; record observations. **Deliverable: `audit.md`.** **Evidence:** `audit.md` present (file-by-file findings, reusable concepts, obsolete code, security issues, migration recommendations).
+- [ ] 1.3 Record initial build behavior: run `npm install` and `npm run build` on the starting commit; document the exact commands and the pass/fail result. *(No build has been run yet — this must be executed and recorded before it may be checked.)*
+- [ ] 1.4 Write characterization checks (Vitest) for reusable current behavior: front matter structure, slug generation, directory listing → post list, SHA-based conflict detection.
+- [ ] 1.5 Delete obsolete code per audit: `src/components/updatePost.js`, `src/components/addImage.js`. Verify no other module imports them.
 
 ## 2. Establish app foundation
-- [ ] 2.1 Propose and document final workspace layout and local start commands; identify current Node support.
-- [ ] 2.2 Introduce TypeScript incrementally with stable frontend build, lint, and typecheck commands.
-- [ ] 2.3 Add minimal Node backend with documented safe local environment setup and health endpoint.
-- [ ] 2.4 Add shared request validation and typed domain error mapping, with unit tests.
-- [ ] 2.5 Add CI workflow that runs lint, typecheck, and tests.
+- [ ] 2.1 Rewrite `package.json`: correct package name to `gitdatnote`, remove obsolete dependencies (`node`, `react-scripts`, duplicate `dotenv`), add `typescript`, `vitest`, `@playwright/test`, `better-sqlite3`, `zod`, `tsx`, `@types/node`, `dompurify`. Add `engines` field (`"node": ">=24"`, Node.js 24 LTS). Add `scripts` for `dev`, `build`, `lint`, `typecheck`, `test`, `test:e2e`, `test:integration`.
+- [ ] 2.2 Create `tsconfig.json` (base), `tsconfig.web.json` (Vite/React), `tsconfig.server.json` (Node). Create `vite.config.ts` with React plugin and `/api` proxy to `http://localhost:3000`. Create `vitest.config.ts`.
+- [ ] 2.3 Create `src/shared/` directory with initial types: `types.ts` (Repository, FileContent, DirectoryListing, ErrorDomain, ErrorResponse), `validate.ts` (path canonicalization, size limits, content validation), `errors.ts` (error codes, GitHub error mapping), `frontMatter.ts` (front matter generation with title, date, description, tags; YAML-safe).
+- [ ] 2.4 Create `src/server/` entry point (`index.ts`) with: HTTP server (Node `http` or `express`), `/api/health` endpoint, request logging middleware (no file content in logs), error handling middleware (maps exceptions to standard error response format).
+- [ ] 2.5 Create `src/web/` with `main.tsx` (migrated from `src/main.jsx`), `App.tsx` (migrated from `src/App.jsx` with fixes: **render Markdown preview through `marked` + `DOMPurify` sanitization into a scoped element — never assign unsanitized rendered Markdown to `innerHTML`**, error handling, loading states). Add connected-state UI shell: GitHub not connected → "Connect GitHub" button; connected → repository selector + content area.
+- [ ] 2.6 Add unit tests for `src/shared/`: path validation (absolute, traversal, null byte, valid nested paths, root listing), error mapping (all GitHub status codes), front matter generation (valid YAML, special characters in titles, date format), slug generation.
+- [ ] 2.7 Add **XSS regression tests** for the web Markdown preview: assert that `<script>`, `onerror=`/`onload=` attributes, `javascript:` links, and raw `<iframe>`/`<object>` embedded in Markdown are neutralized in the rendered preview (Playwright/Vitest + jsdom).
+- [ ] 2.8 Add `.github/workflows/ci.yml`: install dependencies, lint, typecheck (web + server), build, run unit tests and mocked integration tests. Node version: 24 LTS.
+- [ ] 2.9 Update `.eslintrc.cjs` for TypeScript (add `@typescript-eslint` parser and plugin, update `ignorePatterns` for `dist`, `dist-server`, `node_modules`).
 
 ## 3. Secure GitHub connection
-- [ ] 3.1 Confirm GitHub App auth, installation, and permissions design; document repo-creation limitation.
-- [ ] 3.2 Add server-side auth start/callback/session/logout with state verification and secure cookie configuration.
-- [ ] 3.3 Add auth/CSRF/authorization tests for denied consent, expired sessions, wrong repository, and callbacks with invalid state.
-- [ ] 3.4 Add connect/disconnect UI and repository selection states with clear errors.
-- [ ] 3.5 Verify browser bundles and logs do not contain GitHub credentials.
+- [ ] 3.1 Implement `src/server/session/`: SQLite session storage using `better-sqlite3`. Schema: `sessions` table (session_id, user_login, user_name, user_avatar_url, csrf_token, token_encrypted, refresh_token_encrypted, token_expires_at, refresh_expires_at, created_at). Encryption: AES-256-GCM using `SESSION_ENCRYPTION_KEY` (key from env, never in DB/source). Cookie settings: `HttpOnly`, `Secure` (production), `SameSite=Lax`, `Path=/`.
+- [ ] 3.2 Implement `src/server/auth/`: GitHub App authorization flow. `GET /api/auth/github/start` (generate state, redirect to GitHub using **Client ID** `GITHUB_APP_CLIENT_ID` — never private key/App ID — with `scope=repo read:user user:email offline_access`). `GET /api/auth/github/callback` (validate state, exchange code at `POST /login/oauth/access_token` using **Client ID + Client Secret** `GITHUB_APP_CLIENT_SECRET`, fetch `/user` and `/user/emails`, create session storing **access token, refresh token, and both expiry timestamps** encrypted, set cookie). `POST /api/auth/logout` (invalidate session, clear cookie; CSRF header required). `GET /api/session` (return session state + CSRF token). `GET /api/repositories` (return accessible repos with content root).
+- [ ] 3.3 Implement CSRF protection: generate random CSRF token on session creation, store in SQLite. `GET /api/session` returns it. **All state-changing requests (POST, PUT, DELETE — including `POST /api/auth/logout`) validate the `X-CSRF-Token` header only** (never from body/cookie/query). Invalid/missing → `403 CSRF_INVALID`.
+- [ ] 3.4 Implement repository authorization: before any `/api/repos/{owner}/{repo}/content` operation, verify **both** the connected user's permission **and** the GitHub App's installation access (scoped read/write) — the repo must be installed and permissioned for the App. `GET /api/repositories` returns `canRead`/`canWrite` per repo. Not authorized → `403 REPO_NOT_ALLOWED`. Visible-but-not-writable repos are read-only.
+- [ ] 3.5 Add auth/CSRF/authorization tests (Vitest): successful authorization flow, state mismatch, consent denied, expired pending session, invalid CSRF token, missing CSRF token (incl. on logout), wrong repository (no access), token revocation mid-session, session expiry, **access-token expiry with valid refresh (rotation succeeds), expired/invalid refresh token (session invalidated, re-auth required), refresh token used once (rotation enforced)**.
+- [ ] 3.6 Add connect/disconnect UI in `src/web/`: "Connect GitHub" button when not connected, user info + repository selector when connected, "Disconnect" button, clear error states for each failure mode.
+- [ ] 3.7 Verify browser bundles do not contain GitHub credentials: inspect `dist/` output for token strings, `GITHUB_APP_*` env vars, or OAuth secrets. Verify server logs do not contain tokens or file content.
 
 ## 4. Repository content service
-- [ ] 4.1 Define typed GitHub adapter and path/repository authorization boundaries.
-- [ ] 4.2 Implement list and read operations with mocked tests.
-- [ ] 4.3 Implement create operation; reject existing files and invalid paths, test both.
-- [ ] 4.4 Implement update operation requiring expected SHA; detect and report conflicts without overwrite.
-- [ ] 4.5 Implement rate-limit/network/permission failure mapping and safe retry UI states.
-- [ ] 4.6 Run opt-in integration tests with throwaway GitHub repository and clean up test content.
+- [ ] 4.1 Implement `src/server/content/`: Octokit adapter behind an interface. Operations: `listContent(owner, repo, path)`, `readContent(owner, repo, path)`, `createContent(owner, repo, path, content, message)`, `updateContent(owner, repo, path, content, expectedSha, message)`. All paths validated against the repository's configured content root.
+- [ ] 4.2 Implement `GET /api/repos/{owner}/{repo}/content` endpoint: file read (returns content + blob SHA + size) and directory listing (returns children array with name, type, sha, size). Authorization check on every request.
+- [ ] 4.3 Implement `POST /api/repos/{owner}/{repo}/content` endpoint: create file. Reject if file exists (`409 FILE_EXISTS`). Reject invalid paths (`422 PATH_INVALID`). Reject content > 1 MB (`422 CONTENT_TOO_LARGE`). Commit message: `"Create {path}"` by default. **Committer identity: do not invent/hardcode/guess a name or email — omit the committer field (GitHub attributes to the token owner); author name MAY be the public login; include email only if publicly visible.**
+- [ ] 4.4 Implement `PUT /api/repos/{owner}/{repo}/content` endpoint: update file. Require `expectedSha`. If SHA mismatch → `409 SHA_CONFLICT` (include current SHA in response). If file not found → `404 FILE_NOT_FOUND`. Commit message: `"Update {path}"` by default. **Committer identity as in 4.3 (no fabricated email, GitHub attribution).**
+- [ ] 4.5 Implement error mapping for all GitHub API failures: 401 → `UNAUTHORIZED` (invalidate session), 403 → `REPO_NOT_ALLOWED`, 404 → `FILE_NOT_FOUND`, 409 → `SHA_CONFLICT`, 422 → `PATH_INVALID`/`CONTENT_TOO_LARGE`, 429 → `RATE_LIMITED` (include `Retry-After`), network → `GITHUB_UNAVAILABLE`. All mapped to standard error response format.
+- [ ] 4.6 Implement UTF-8 encoding: encode content as UTF-8 base64 before sending to GitHub, decode responses to UTF-8. Add test: create file with accented characters, CJK, emoji; read back; verify round-trip.
+- [ ] 4.7 Add mocked integration tests (Vitest + mock Octokit): list directory, read file, create new file, create existing file (409), update with correct SHA, update with wrong SHA (409), update non-existent file (404), invalid path (traversal, absolute, null byte), content too large, rate limit, GitHub unavailable, UTF-8 round-trip.
+- [ ] 4.8 Add safe retry UI states: `RATE_LIMITED` shows "GitHub rate limit reached — try again in {n} seconds" with retry button; `GITHUB_UNAVAILABLE` shows "GitHub is unreachable — check your connection and retry"; `SHA_CONFLICT` shows "This file was modified by someone else — reload and try again."
 
-## 5. Verify and document
-- [ ] 5.1 Complete browser smoke test for sign-in state, selected repository, read, create and update flow.
-- [ ] 5.2 Run project checks and record exact commands, results and limitations.
-- [ ] 5.3 Update setup/security docs and record unresolved issues for next OpenSpec change.
-- [ ] 5.4 Review acceptance scenarios, confirm no SecondBrain writes, and only then archive this change.
+## 5. Integration and E2E tests
+- [ ] 5.1 Set up dedicated test repository for real GitHub integration tests. Create a setup script (`integration/setup.mjs`) that documents how to create the repo and set `GITHUB_INTEGRATION_TOKEN`. Tests in `integration/` run only when `GITHUB_INTEGRATION=true`.
+- [ ] 5.2 Implement Playwright E2E tests (`e2e/`): sign-in state (not connected → connected), repository selection, read file, create file, update file, conflict error display, CSRF rejection, unauthorized repository.
+- [ ] 5.3 Run real GitHub integration tests against the dedicated test repo. Verify: create file, read back (content matches), update with correct SHA, update with wrong SHA (409), list directory. **Cleanup is isolated and test-only: write into a unique timestamped subdirectory (`__gitdatnote-integration-<UTC-ISO>/`) and clean up by calling the GitHub Contents API directly with `GITHUB_INTEGRATION_TOKEN` — NOT through the production API (which has no delete). A failed cleanup is a logged failure, never a pass. Never run against SecondBrain or any production repo.**
+
+## 6. Verify and document
+- [ ] 6.1 Run all project checks: `npm run lint`, `npm run typecheck`, `npm run build`, `npm test`, `npm run test:e2e`. Record exact commands, results, and any limitations.
+- [ ] 6.2 Update setup/security docs: `README.md` with prerequisites (**Node.js 24 LTS**), environment variables (`GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`, `SESSION_ENCRYPTION_KEY`), GitHub App registration steps, how to start frontend and backend, how to run tests. Security section: CSRF (header-only, all verbs incl. logout), cookie settings, token storage/refresh/rotation, path validation, size limits, logging, Markdown sanitization.
+- [ ] 6.3 Review all acceptance scenarios from the three delta specs. Confirm no writes to SecondBrain or any production repository. Confirm browser bundles contain no credentials. Confirm server logs contain no tokens or file content.
+- [ ] 6.4 Record unresolved issues and follow-up items for the next OpenSpec change (article editor). Archive this change.
