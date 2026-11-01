@@ -151,3 +151,54 @@ Template assets. Harmless; can be kept or removed.
 7. **Add** `src/shared/` with types, validation, and error domain.
 8. **Add** `.github/workflows/ci.yml` for lint/typecheck/build/test.
 9. **Do NOT** write to the SecondBrain repository in any automated test.
+
+---
+
+## Initial Build Behavior (task 1.3)
+
+> Recorded 2026-11-01 on branch `feat/gitdatnote-2`. Goal: establish and document how the
+> original application builds, including failures, dependency problems, and environment limits.
+> No source code was modified.
+
+### Environment
+| Item | Value |
+|---|---|
+| OS / arch | Linux x64 (7.2.8-9-omarchy) |
+| Node.js | **v26.7.0** (npm **11.19.0**) — **newer than the target Node 24 LTS** and newer than the bogus `node@^21.1.0` dep |
+| Lockfile | `package-lock.json` present (lockstep install) |
+| `node_modules` | absent before install |
+
+### Command: `npm install` — result **exit 0 (success)**
+- **1402 packages** added, 1403 audited (~11s).
+- `npm warn deprecated` for eslint@8.57.1 and several babel/rollup/transitive packages.
+- **78 vulnerabilities** reported (19 low, 21 moderate, 34 high, 4 critical) — consistent with the audit's finding that the dependency set is obsolete.
+- **4 install scripts were skipped** because npm 11 does not cover them under `allowScripts`:
+  - `core-js@3.39.0` and `core-js-pure@3.39.0` (`postinstall`)
+  - `esbuild@0.18.20` (`postinstall: node install.js`)
+  - `node@21.7.3` (`preinstall: node installArchSpecificPackage`)
+- **The bogus `node` dependency installed successfully**: `node_modules/node` is present at version `21.7.3`. It is the Node runtime published to npm as a shell package — it is **not** a usable application dependency and should be removed (task 2.1). Its install script was among the skipped scripts, so no native Node binary was wired in; this has no effect on the Vite build (the real runtime is the host Node).
+- **`react-scripts` installed** (unused CRA dependency) and adds to the footprint.
+- The skipped `esbuild` postinstall was **not** a blocker in this environment: the platform binary `node_modules/@esbuild/linux-x64` is present and `node_modules/.bin/esbuild` resolves, so Vite's bundler worked. *(In environments where the esbuild binary is unavailable, the skipped postinstall would surface as a build failure.)*
+
+### Command: `npm run build` — result **exit 0 (success)**
+- Build script is **`vite build`** (package name still reads `11tycms`).
+- Output:
+  ```
+  vite v4.5.5 building for production...
+  ✓ 113 modules transformed.
+  dist/index.html                   0.45 kB │ gzip:  0.30 kB
+  dist/assets/index-97468755.css    2.18 kB │ gzip:  1.00 kB
+  dist/assets/index-d3ec8392.js   335.02 kB │ gzip: 94.64 kB
+  ✓ built in 561ms
+  ```
+- `dist/` produced: `index.html`, `vite.svg`, `assets/index-*.js`, `assets/index-*.css`.
+
+### Why the build succeeds despite known source bugs
+- The top-level-`await` bugs in `src/components/updatePost.js` and `src/components/addImage.js` are **not reachable from the bundle**: no other module imports either file (`grep` for `updatePost|addImage` across `src/` returns no importers). Vite tree-shakes/unreached modules are never evaluated, so their module-scope `await` never executes. The bundle therefore builds cleanly even though those files are broken.
+- The `setHTML()` bug in `src/App.jsx` is a **runtime** (render-time) error, not a build-time one — it does not affect `vite build`.
+
+### Conclusion
+- **The original application builds successfully** (`npm install` and `npm run build` both exit 0) in this environment, producing a `dist/` bundle.
+- **Environment limitation / caveat:** the build was verified on **Node v26.7.0**, which is newer than the project's target **Node 24 LTS** and newer than the stray `node@^21` dep. The build is not guaranteed reproducible on exactly 24 LTS until re-verified there; the obsolete dependency set (78 vulnerabilities, deprecated tooling) remains a risk.
+- **Dependency problems (for task 2.1):** remove `node` and `react-scripts`, de-duplicate `dotenv`, and declare any missing import (`node-base64-img`) — though `addImage.js` is slated for deletion, making that import moot.
+- **No source code was modified** to achieve this result; the build ran against the unmodified starting commit.
