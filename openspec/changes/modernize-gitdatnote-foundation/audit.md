@@ -323,3 +323,46 @@ Tested with a **hoisted `octokit` module mock** (no real GitHub API requests).
   before it can be characterized.
 - **`App.jsx` render flow** (the `setHTML()` call): a React runtime concern requiring a full
   component mount; out of scope for these module-level characterization tests.
+
+---
+
+## Obsolescence Removal — Task 1.5
+
+> Recorded 2026-11-01 on branch `feat/gitdatnote-2`. Goal: remove obsolete, unreferenced
+> legacy code. **Files removed: `src/components/updatePost.js` (861 B), `src/components/addImage.js` (1,030 B).**
+
+### Why each file is obsolete
+- **`updatePost.js`:** A module-scope script (not a callable function) — it performs a
+  top-level `await` GET + PUT against a **hardcoded, different repository**
+  (`MyConsciousStream`, path `content/blog/testpost.md`), hardcodes a personal name/email
+  (`Kevin C. Tofel` / `kevin@kctofel.com`), and uses the `GITHUB_AUTH_KEY` env var which is
+  **not used by any other module** in the app. It is imported by nothing.
+- **`addImage.js`:** Same pattern — module-scope top-level `await` PUT of a base64-encoded
+  image (`./images/IMG_0076.jpeg` → `public/img/test1.jpg`) to the same hardcoded
+  `MyConsciousStream` repo, same hardcoded identity and `GITHUB_AUTH_KEY`. It also imports
+  **`node-base64-img`, which is not declared in `package.json`** — a latent missing-dep
+  bug that disappears with the file.
+
+### Reference scan (no active imports remain)
+- `grep -rn -E "updatePost|addImage" src/ index.html vite.config.js` → **0 matches.**
+- Project-wide scan (excluding `node_modules`, `dist`, `.git`, `openspec`, `docs`) → the only
+  remaining mentions are two **historical comment references** inside
+  `tests/characterization/legacy-behavior.test.js` (the task 1.4 finding D notes), which are
+  explicitly allowed per the task instructions and are not code references.
+
+### Verification (no regressions)
+| Check | Result |
+|---|---|
+| `npm run test` | **25/25 passing** (exit 0) |
+| `npm run build` | **exit 0** — identical 113-module output, same asset hashes (`index-97468755.css`, `index-d3ec8392.js`) |
+| `openspec validate modernize-gitdatnote-foundation` | **exit 0** — "Change ... is valid" (same 2 pre-existing non-blocking length warnings) |
+| `git diff --check` | **exit 0** (clean) |
+| `git status --short` | exactly two deletions: `D src/components/addImage.js`, `D src/components/updatePost.js` |
+
+### Notes
+- No dependencies were removed or upgraded (per instruction); the undeclared `node-base64-img`
+  import is simply gone with its file — it is not a declared dependency in `package.json`, so
+  there was nothing to remove there.
+- No other application source files were changed; no replacement editing/image-upload
+  functionality was implemented (future home: repository-content service, tasks 4.x).
+- `git status` confirms only the two intended deletions are staged-for-commit (uncommitted).

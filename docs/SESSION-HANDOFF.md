@@ -1,10 +1,10 @@
 # Session Handoff — `modernize-gitdatnote-foundation`
 
 **Date:** 2026-11-01 · **Branch:** `feat/gitdatnote-2` (starting commit `2f3bbef`)
-**Status:** OpenSpec artifact pass complete; **tasks 1.1–1.4 done** (1.1 branch, 1.2 source audit, 1.3 build behavior, 1.4 characterization tests). No application source code modified. Change is **not archived**.
+**Status:** OpenSpec artifact pass complete; **tasks 1.1–1.5 done** (1.1 branch, 1.2 source audit, 1.3 build behavior, 1.4 characterization tests, 1.5 obsolete-code removal). No application source code modified/added (only two obsolete files deleted in 1.5). Change is **not archived**.
 **Validation:** `openspec validate modernize-gitdatnote-foundation` → **exit 0, "Change ... is valid"** (2 non-blocking length warnings).
 **Tests:** `npm run test` → **25/25 passing** (`tests/characterization/legacy-behavior.test.js`).
-**Build:** `npm run build` → exit 0 (113 modules; unchanged output after the Vitest dependency change).
+**Build:** `npm run build` → exit 0 (113 modules; unchanged output, same asset hashes, after the Vitest dependency change AND after the 1.5 deletions).
 
 ## Completed tasks with evidence
 
@@ -16,6 +16,7 @@
   - **B slugify 1.6.6 (as called in `newPost.js`):** case preserved; apostrophes and `*`/`:`/`!` kept in slugs (verified empirically); diacritics transliterated; CJK stripped to `""`; collision risks (distinct titles → same slug; caller has no existence check → silent overwrite).
   - **C `getPostTitles`:** hoisted `octokit` mock (no real API calls); hardcoded endpoint `GET /repos/{owner}/{repo}/contents/Journal/2024/December/` + owner/repo; `.md` name filter; `post.type` ignored (dirs listed as posts); empty dir → `[]`; `postInfo` is dead code (documented, not testable without refactoring).
   - **D SHA conflict detection:** **absent on the live path** — `newPost.js` PUTs with no `sha`; `updatePost.js`'s SHA pattern is unreachable (module-scope `await`, hardcodes a different repo) and would hit the real GitHub API if executed. Future home: `repository-content` spec "Create without overwriting"/"Update with expected SHA", tasks 4.3/4.4.
+- **1.5** Removed obsolete, unreferenced code: `src/components/updatePost.js` + `src/components/addImage.js` (both module-scope scripts, top-level `await`, hardcoded `MyConsciousStream` repo + personal identity, `GITHUB_AUTH_KEY`; `addImage.js` also imported undeclared `node-base64-img`). Reference scan → zero active imports (only historical comment refs in the characterization tests, allowed). No regressions: tests 25/25, build exit 0 (same asset hashes), validate exit 0. Findings: `audit.md` → "Obsolescence Removal — Task 1.5".
 
 ## Files created/modified (this task, on disk, NOT committed)
 
@@ -35,7 +36,6 @@
 - `npm install` re-triggered the spurious **typescript 5.7.2→4.9.5** downgrade (second occurrence — task 1.3 lesson applied); fix = explicit `npm install -D typescript@5.7.2`.
 
 ## Remaining tasks (NOT complete — do not start without explicit approval)
-- **1.5** Delete obsolete code (`updatePost.js`, `addImage.js`); verify no other module imports them.
 - **2.x** App foundation (package.json/tsconfig/vite config, shared/server/web layout, DOMPurify preview, XSS tests, CI, ESLint).
 - **3.x** Secure GitHub connection (sessions, auth flow w/ token refresh/rotation, CSRF, dual repo auth, UI, credential-leak checks).
 - **4.x** Repository content service (Octokit adapter, endpoints, error mapping, UTF-8, commit identity, tests, retry UI). **4.3/4.4 are the home for SHA conflict detection + file-exists checks (per task 1.4 finding D).**
@@ -57,4 +57,4 @@ npm run test                                                            # expect
 npm run build                                                           # expect: exit 0
 grep -nE '^\s*- \[(x| )\]' openspec/changes/modernize-gitdatnote-foundation/tasks.md
 ```
-**Next (only after explicit approval): task 1.5** (delete obsolete code). Do **not** archive this change until implementation and verification are complete.
+**Next (only after explicit approval): task 2.1** (app foundation). Do **not** archive this change until implementation and verification are complete.
