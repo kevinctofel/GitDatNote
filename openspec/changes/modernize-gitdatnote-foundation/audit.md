@@ -565,4 +565,29 @@ Comprehensive unit tests for the five shared modules (`ed0516c` + review correct
 
 **Limitations / not covered:** coverage instrumentation not added (not required; behavior-based reporting above). Branches not exercised: 422 `validation` values outside `'path' | 'size'` (type-level only), `retryAfterSeconds` negative/NaN edge values, and `validateContentPath` behavior for roots containing `.`-only or empty-segment-only strings (all reduce to empty root, covered by the empty-root case). `types.ts` has no runtime behavior; its suite pins shapes at compile time plus runtime discriminators.
 
-**Not done (out of scope):** task 2.4 (server), 2.5 (web), 2.7 (e2e), 2.8 (CI), 2.10 (dependency security). No commits, pushes, or archiving — all task-2.6 files are on disk, uncommitted.
+**Not done (out of scope at that time):** task 2.5 (web), 2.7 (e2e), 2.8 (CI), 2.10 (dependency security). No commits, pushes, or archiving. (Task 2.4 was completed in the session that followed — see the section below.)
+
+## Backend Foundation — Task 2.4
+
+**Scope:** establish the Node/TypeScript backend foundation: standalone server entry point, `/api/health`, structured request logging, standardized error handling, server build + start scripts, real-HTTP verification.
+
+**Files:**
+
+| File | Change |
+|---|---|
+| `src/server/index.ts` | New. Standalone Node `http` server: `createApp()` factory (testable, no listening side effect when imported), `main()` entry (env `PORT` default 3000 / `HOST` default 127.0.0.1 / `LOG_LEVEL` default `info`; SIGINT/SIGTERM graceful shutdown with 5 s force-exit; `EADDRINUSE`/server-error → exit 1; direct-run guard via `import.meta.url` vs `argv[1]`). |
+| `src/server/middleware/logging.ts` | New. `LogLevel`, `resolveLogLevel()` (env `LOG_LEVEL`), `createLogger()`, `logRequest()` — single-line structured JSON; request entries carry only method, pathname, status, durationMs. |
+| `src/server/middleware/errorHandling.ts` | New. `sendJsonError()` (shared `toErrorResponse`), `sendApiNotFound()` (JSON 404, `FILE_NOT_FOUND`), `sendUnexpectedError()` (safe `INTERNAL_ERROR` 500; server log records error name only — no message, stack, paths, or credentials client-side or in logs). |
+| `tests/unit/server/server.test.ts` | New. 9 tests over real HTTP on ephemeral ports: health exact JSON, non-GET health 404, unknown `/api/*` JSON 404, non-API plain 404, request-log fields with query-string exclusion, log suppression at `error` level, `LOG_LEVEL` env parsing, unexpected-error boundary (no leakage client- or server-side), clean shutdown. |
+| `tsconfig.server-build.json` | New. Extends `tsconfig.server.json`; `noEmit: false`, `rootDir: src`, includes only `src/server` + `src/shared` (tests/tooling configs never emitted). |
+| `package.json` | Modified. Scripts: `start` (`node dist-server/server/index.js`), `dev:server` (local `tsx src/server/index.ts`), `build:server` (`tsc -p tsconfig.server-build.json`). No new dependencies. |
+
+**Framework decision:** Node built-in `http` module — the design's approved alternative to `express`; `express` is not in the approved dependency set, so no framework was added.
+
+**Endpoints:** `GET /api/health` → `200 { "status": "ok" }` (no auth; confirms only the HTTP process responds, not future services). Unknown `/api/*` → standard JSON 404 envelope (`FILE_NOT_FOUND`). Non-`/api` → plain-text 404 (frontend territory). The shared `ShaConflictErrorResponse` contract is preserved untouched for future route integration.
+
+**Build:** `npm run build:server` emits ESM to `dist-server/` — verified git-ignored (`git check-ignore -v` → `.gitignore` line 27) and absent from `git status`. `npm run build` remains the frontend-only `vite build` per design A-08; output verified byte-identical (`index-fd616a1b.js`, `index-97468755.css`).
+
+**Verification (2026-11-02):** `npm run lint` 0 (new server source covered by the existing `--ext js,jsx,ts,tsx` gate and `tsconfig.server.json`); `npm run typecheck` 0; `npm run test` 287/287 (278 pre-existing + 9 new server tests), 8 test files; `npm run build` 0; `npm run build:server` 0; `openspec validate modernize-gitdatnote-foundation` exit 0 (2 pre-existing non-blocking length warnings); `git diff --check` clean. Real HTTP smoke tests: compiled server (`npm start`, port 3999) and tsx dev server (port 3998) both started, served `{"status":"ok"}`, logged requests without sensitive data, returned JSON errors for unknown API routes, and exited 0 on SIGTERM with a `shutdown` log entry; no server process left running.
+
+**Limitations:** Node 24 runtime compatibility is verified by configuration only (`NodeNext`, Node 24-compatible APIs — `fetch`/structuredClone not used in the server); the Node 24 LTS runtime gate belongs to task 2.8 (local runtime is Node v26.7.0). `npm audit` findings (25 vulnerabilities) remain deferred to task 2.10.
