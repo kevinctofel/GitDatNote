@@ -10,6 +10,7 @@
   "include": [
     "src/server",
     "src/shared",
+    "tests/unit",
     "vitest.config.ts"
   ]
 }
