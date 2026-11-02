@@ -1,7 +1,7 @@
 # Session Handoff — `modernize-gitdatnote-foundation`
 
-**Date:** 2026-11-02 · **Branch:** `feat/gitdatnote-2` (HEAD `974a8d1` — task 2.2 committed by user; **task 2.9 done, on disk, uncommitted**)
-**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. **Task 2.2 done + committed by user as `974a8d1`** (`tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json`, `vite.config.ts` (React + `/api` proxy), `vitest.config.ts` (25 legacy tests retained), real `typecheck` script — all verified green). **Task 2.9 done (on disk, uncommitted):** ESLint working — `.eslintrc.cjs` fixed (top-level `node` moved into `env`), `@typescript-eslint` 8.72.1 parser+plugin, `ts,tsx` in the lint script, `ignorePatterns` for `dist`/`dist-server`/`node_modules`; 4 dead-code fragments removed from legacy sources + one per-file `prop-types` override on `Post.jsx`; `npm run lint` exit 0. Change is **not archived**; task 2.3 **not started**.
+**Date:** 2026-11-02 · **Branch:** `feat/gitdatnote-2` (HEAD `b927bca` — task 2.9 committed by user; **task 2.3 done, on disk, uncommitted**)
+**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. **Task 2.2 done + committed by user as `974a8d1`** (`tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json`, `vite.config.ts` (React + `/api` proxy), `vitest.config.ts` (25 legacy tests retained), real `typecheck` script — all verified green). **Task 2.9 done + committed by user as `b927bca`:** ESLint working — `.eslintrc.cjs` fixed (top-level `node` moved into `env`), `@typescript-eslint` 8.72.1 parser+plugin, `ts,tsx` in the lint script, `ignorePatterns` for `dist`/`dist-server`/`node_modules`; 4 dead-code fragments removed from legacy sources + one per-file `prop-types` override on `Post.jsx`; `npm run lint` exit 0. **Task 2.3 done (on disk, uncommitted):** all five `src/shared/` modules created — `types.ts`, `validate.ts`, `errors.ts`, `frontMatter.ts`, `slug.ts` — pure, platform-independent strict TypeScript, no new dependencies; all verification green (lint/typecheck/25 tests/build/openspec validate). Change is **not archived**; task 2.4 **not started**.
 **Validation:** `openspec validate modernize-gitdatnote-foundation` → **exit 0, "Change ... is valid"** (2 non-blocking length warnings).
 **Tests:** `npm run test` → **25/25 passing** (`tests/characterization/legacy-behavior.test.js`).
 **Build:** `npm run build` → exit 0 (113 modules; unchanged output, same asset hashes, after the Vitest dependency change AND after the 1.5 deletions).
@@ -37,7 +37,7 @@
 
 **Design deviations documented (audit.md §2.2):** each domain config carries its root tooling config for genuine `tsc` inputs (no fourth tsconfig, no empty projects, no `allowJs` on legacy JSX); base tsconfig is never run directly; server `outDir` is ready for task 2.4 but the production compile will need a `noEmit` override or a dedicated build config.
 
-## Files modified for task 2.9 (on disk, uncommitted)
+## Files modified for task 2.9 (committed as `b927bca`)
 
 | File | Change |
 |---|---|
@@ -52,6 +52,20 @@
 | `openspec/.../audit.md` | "ESLint Configuration — Task 2.9" section (config choices, legacy fixes, verification) |
 
 **2.9 verification (2026-11-02):** `npm run lint` exit 0 (0 errors, 0 warnings; `--max-warnings 0`; TS tooling configs confirmed in scope); `npm run typecheck` exit 0; `npm run test` 25/25; `npm run build` exit 0 (unchanged asset hashes); `openspec validate` exit 0; `git diff --check` clean.
+
+## Files modified for task 2.3 (on disk, uncommitted)
+
+| File | Change |
+|---|---|
+| `src/shared/types.ts` | new — `Repository`, `FileContent`, `DirectoryListing`, `ErrorDomain` (11 codes), `ErrorStatus`, `ErrorDetail`, `ErrorResponse`, `RepositoryPath`/`RelativePath` naming types (Octokit-independent) |
+| `src/shared/validate.ts` | new — `MAX_MARKDOWN_BYTES` (1 MiB), `utf8ByteLength` (`TextEncoder`, no `Buffer`), `validateContentPath` (forward-slash semantics; rejects backslashes, null bytes, control chars, absolute paths, `..` escapes; empty path allowed only for root listings), `validateMarkdownContent` (UTF-8 byte size), discriminated-union results |
+| `src/shared/errors.ts` | new — `ERROR_CODES` (status + retryable per code), `mapGithubHttpError` (401/403/404/409/422/429/5xx/unknown, conservative ambiguity handling via optional `context`), `mapGithubNetworkError`, `toErrorResponse`; fixed client-safe messages only |
+| `src/shared/frontMatter.ts` | new — `buildFrontMatter({title, date, description?, tags?})`: deterministic, order title/description/date/tags; double-quoted escaped strings; unquoted validated ISO date; empty optionals omitted; throws on invalid input; Unicode preserved; no YAML library added |
+| `src/shared/slug.ts` | new — `generateSlug(title)`: NFKD → strip `\p{M}` → lowercase → collapse `[^a-z0-9]+` runs to `-` → trim → `untitled` fallback; non-Latin scripts dropped (legacy-consistent) |
+| `openspec/.../tasks.md` | 2.3 marked `[x]` with Evidence |
+| `openspec/.../audit.md` | "Shared Domain Modules — Task 2.3" section (choices, limitations, verification) |
+
+**2.3 verification (2026-11-02):** `npm run lint` exit 0 (`src/shared` confirmed in scope via direct lint run); `npm run typecheck` exit 0 (both tsconfigs include `src/shared` — relative imports use explicit `.js` extensions for `NodeNext`/`bundler` compatibility); `npm run test` 25/25 legacy tests pass (unchanged); `npm run build` exit 0 (unchanged asset hashes); `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean. Runtime behavior of all exports verified via a throwaway `tsx` probe (~65 assertions, deleted after use); no vitest include-set changes — the unit-test matrix is task 2.6. No new dependencies; no imports from `src/web`/`src/server`; no fs/DOM/Node APIs.
 
 ## Files modified for task 2.1 (committed as `6dde9f4`)
 
@@ -76,7 +90,7 @@
 - `npm install` re-triggered the spurious **typescript 5.7.2→4.9.5** downgrade (second occurrence — task 1.3 lesson applied); fix = explicit `npm install -D typescript@5.7.2`.
 
 ## Remaining tasks (NOT complete — do not start without explicit approval)
-- **2.x** App foundation — revised order **2.1 (done) → 2.2 (done) → 2.9 (done) → 2.3 → 2.4 → 2.5 → 2.6 → 2.7 → 2.8 → 2.10**: tsconfigs + `typecheck` (2.2, committed `974a8d1`), ESLint TS config (2.9, done, on disk), `src/shared/` incl. explicit `slug.ts` (2.3), server entry (2.4), minimal functional React shell, no visual design choices (2.5), unit tests incl. slug tests (2.6), Playwright + `test:e2e` XSS regression tests (2.7), CI on Node 24 + 26 (2.8), targeted dependency-security review gate (2.10).
+- **2.x** App foundation — revised order **2.1 (done) → 2.2 (done) → 2.9 (done, committed `b927bca`) → 2.3 (done, on disk, uncommitted) → 2.4 → 2.5 → 2.6 → 2.7 → 2.8 → 2.10**: tsconfigs + `typecheck` (2.2, committed `974a8d1`), ESLint TS config (2.9, committed `b927bca`), `src/shared/` incl. explicit `slug.ts` (2.3, on disk), server entry (2.4), minimal functional React shell, no visual design choices (2.5), unit tests incl. slug tests (2.6), Playwright + `test:e2e` XSS regression tests (2.7), CI on Node 24 + 26 (2.8), targeted dependency-security review gate (2.10).
 - **3.x** Secure GitHub connection (sessions, auth flow w/ token refresh/rotation, CSRF, dual repo auth, UI, credential-leak checks).
 - **4.x** Repository content service (Octokit adapter, endpoints, error mapping, UTF-8, commit identity, tests, retry UI). **4.3/4.4 are the home for SHA conflict detection + file-exists checks (per task 1.4 finding D).**
 - **5.x** Integration + E2E tests (dedicated test repo, Playwright, isolated cleanup).
@@ -100,4 +114,4 @@ npm run build                                                           # expect
 npm ls --depth=0                                                        # expect: clean tree
 grep -nE '^\s*- \[(x| )\]' openspec/changes/modernize-gitdatnote-foundation/tasks.md
 ```
-**Next (only after explicit approval):** task 2.3 — create `src/shared/` with `types.ts`, `validate.ts`, `errors.ts`, `frontMatter.ts`, and explicit `slug.ts` (`generateSlug`, tested by task 2.6). The lint gate from task 2.9 will cover these files when they land. Do **not** archive this change until implementation and verification are complete.
+**Next (only after explicit approval):** task 2.4 — create `src/server/index.ts` (HTTP server, `/api/health`, request logging without file content, error middleware using the task-2.3 `errors.ts` mapping). The task-2.3 shared modules are on disk (uncommitted) and available for import. Do **not** archive this change until implementation and verification are complete.
