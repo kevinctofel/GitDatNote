@@ -1,7 +1,7 @@
 # Session Handoff — `modernize-gitdatnote-foundation`
 
-**Date:** 2026-11-01 · **Branch:** `feat/gitdatnote-2` (HEAD `6dde9f4` — task 2.1 committed by user)
-**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. Change is **not archived**; task 2.2 **not started**.
+**Date:** 2026-11-01 · **Branch:** `feat/gitdatnote-2` (HEAD `aa639d7` — Phase 2 review committed by user; **task 2.2 done, on disk, uncommitted**)
+**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. **Task 2.2 done (on disk, uncommitted):** `tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json`, `vite.config.ts` (React + `/api` proxy), `vitest.config.ts` (25 legacy tests retained), real `typecheck` script — all verified green. Change is **not archived**; task 2.9 **not started**.
 **Validation:** `openspec validate modernize-gitdatnote-foundation` → **exit 0, "Change ... is valid"** (2 non-blocking length warnings).
 **Tests:** `npm run test` → **25/25 passing** (`tests/characterization/legacy-behavior.test.js`).
 **Build:** `npm run build` → exit 0 (113 modules; unchanged output, same asset hashes, after the Vitest dependency change AND after the 1.5 deletions).
@@ -17,6 +17,25 @@
   - **C `getPostTitles`:** hoisted `octokit` mock (no real API calls); hardcoded endpoint `GET /repos/{owner}/{repo}/contents/Journal/2024/December/` + owner/repo; `.md` name filter; `post.type` ignored (dirs listed as posts); empty dir → `[]`; `postInfo` is dead code (documented, not testable without refactoring).
   - **D SHA conflict detection:** **absent on the live path** — `newPost.js` PUTs with no `sha`; `updatePost.js`'s SHA pattern is unreachable (module-scope `await`, hardcodes a different repo) and would hit the real GitHub API if executed. Future home: `repository-content` spec "Create without overwriting"/"Update with expected SHA", tasks 4.3/4.4.
 - **1.5** Removed obsolete, unreferenced code: `src/components/updatePost.js` + `src/components/addImage.js` (both module-scope scripts, top-level `await`, hardcoded `MyConsciousStream` repo + personal identity, `GITHUB_AUTH_KEY`; `addImage.js` also imported undeclared `node-base64-img`). Reference scan → zero active imports (only historical comment refs in the characterization tests, allowed). No regressions: tests 25/25, build exit 0 (same asset hashes), validate exit 0. Findings: `audit.md` → "Obsolescence Removal — Task 1.5".
+
+## Files modified for task 2.2 (on disk, uncommitted)
+
+| File | Change |
+|---|---|
+| `tsconfig.json` | new — strict base: ES2022, bundler resolution, noEmit, isolatedModules, `files: []` (extend-only) |
+| `tsconfig.web.json` | new — DOM libs, react-jsx, types vite/client+node; includes `src/web`, `src/shared`, `vite.config.ts` |
+| `tsconfig.server.json` | new — NodeNext, node types, outDir dist-server; includes `src/server`, `src/shared`, `vitest.config.ts` |
+| `vite.config.ts` | new (replaces `.js`) — React plugin, `/api` proxy → `http://localhost:3000` |
+| `vitest.config.ts` | new (replaces `.js`) — include set unchanged: `tests/characterization/**/*.test.js`, env node |
+| `vite.config.js`, `vitest.config.js` | removed |
+| `package.json` | `typecheck` script added: `tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.server.json` |
+| `.gitignore` | `dist-server` added |
+| `openspec/.../tasks.md` | 2.2 marked `[x]` with Evidence |
+| `openspec/.../audit.md` | "TypeScript, Vite, and Vitest Configuration — Task 2.2" section (config choices, deviations) |
+
+**2.2 verification (2026-11-01):** `npm run typecheck` exit 0 (both projects; inputs today = the two root tooling configs, each under its own domain config); `npm run test` 25/25 pass; `npm run build` exit 0, assets unchanged; `git diff --check` clean.
+
+**Design deviations documented (audit.md §2.2):** each domain config carries its root tooling config for genuine `tsc` inputs (no fourth tsconfig, no empty projects, no `allowJs` on legacy JSX); base tsconfig is never run directly; server `outDir` is ready for task 2.4 but the production compile will need a `noEmit` override or a dedicated build config.
 
 ## Files modified for task 2.1 (committed as `6dde9f4`)
 
@@ -66,4 +85,4 @@ npm run build                                                           # expect
 npm ls --depth=0                                                        # expect: clean tree
 grep -nE '^\s*- \[(x| )\]' openspec/changes/modernize-gitdatnote-foundation/tasks.md
 ```
-**Next (only after explicit approval):** task 2.2 (tsconfigs + `typecheck` script + `vitest.config.ts` keeping the 25 legacy tests in the include set). Do **not** archive this change until implementation and verification are complete.
+**Next (only after explicit approval):** task 2.9 — `.eslintrc.cjs` TypeScript config (`@typescript-eslint` parser/plugin, `ignorePatterns` for `dist`/`dist-server`/`node_modules`, fix the invalid top-level `node` property so `npm run lint` passes on the files present at that point). Do **not** archive this change until implementation and verification are complete.

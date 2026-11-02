@@ -444,3 +444,23 @@ working `dev`/`build`/`lint`/`test` scripts) are met, but the **essential script
 `typecheck`, `test:e2e`, and `test:integration` cannot perform real checks without files created in
 tasks 2.2, 2.7, and 5.x respectively. Per the assignment, 2.1 is updated only when its acceptance
 criteria are fully met; the dependency is reported here.
+
+## TypeScript, Vite, and Vitest Configuration — Task 2.2 (2026-11-01)
+
+**Scope:** configuration only. No application source files migrated; `src/web`, `src/server`, and `src/shared` contain no files yet (tasks 2.3/2.4).
+
+**Files created:** `tsconfig.json`, `tsconfig.web.json`, `tsconfig.server.json`, `vite.config.ts`, `vitest.config.ts`. **Removed:** `vite.config.js`, `vitest.config.js`. **Modified:** `package.json` (`typecheck` script), `.gitignore` (`dist-server`).
+
+**Configuration choices (documented deviations/notes vs. design.md A-03/A-08):**
+
+1. **Each domain config carries its root tooling config** so that `tsc --noEmit` has genuine inputs today, before any `src/` TypeScript exists: `vite.config.ts` is checked under `tsconfig.web.json` (the web build's own config), `vitest.config.ts` under `tsconfig.server.json` (node-side tooling). Alternative rejected: adding a fourth `tsconfig.node.json` (deviates from the A-03 file tree) or leaving configs empty (`TS18003 No inputs found`); rejected: including the legacy `src/*.jsx` with `allowJs` (would pull unmigrated code into the typecheck gate).
+2. **Base `tsconfig.json` is extend-only** (`"files": []`); it is never run directly. The design's `typecheck` command (`tsc --noEmit` against web + server) is implemented verbatim as two `-p` invocations in the npm script.
+3. **Server config:** `module: NodeNext`, `moduleResolution: NodeNext`, `lib: ES2022`, `types: ["node"]` — matches Node.js 24 LTS (`engines: ">=24"`) and the `tsx` dev runner; `outDir: dist-server` is in place for the future production compile (task 2.4+). The base `noEmit: true` is inherited, so the production compile will need an explicit override or a dedicated build config when task 2.4 lands; `rootDir` is deliberately not set while `vitest.config.ts` sits at the project root.
+4. **Web config:** `lib: ES2022 + DOM`, `jsx: react-jsx`, `types: ["vite/client", "node"]`. Vite (esbuild) still owns JSX transformation and bundling; `tsc` only type-checks. Legacy `src/*.jsx` is not in any include set (no migration, per task scope).
+5. **Strictness:** `strict`, `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch`, `forceConsistentCasingInFileNames`, `isolatedModules` (required for esbuild/Vite compatibility), `skipLibCheck` (speed; library types not our concern).
+
+**Verification (2026-11-01):** `npm run typecheck` exit 0 (both projects; `--listFilesOnly` confirms the two tooling configs are the only inputs today); `npm run test` 25/25 pass under `vitest.config.ts`; `npm run build` exit 0, output assets unchanged (`dist/index.html`, one CSS, one JS bundle, same sizes as task 1.5); `git diff --check` clean.
+
+**Legacy compatibility:** none introduced. The legacy app continues to run through Vite/esbuild exactly as before; typechecking does not touch it until task 2.5 migrates sources.
+
+**Not done (out of scope):** ESLint TypeScript config (task 2.9 — `npm run lint` still fails on the pre-existing invalid `.eslintrc.cjs`); first `src/shared`/`src/server`/`src/web` modules (tasks 2.3/2.4/2.5); Playwright (task 2.7); CI (task 2.8).
