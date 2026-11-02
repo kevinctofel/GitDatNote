@@ -104,6 +104,7 @@ GitDatNote/
 │   │   ├── types.ts     # Repository, FileContent, DirectoryListing, ErrorDomain
 │   │   ├── validate.ts  # Path validation, content validation, size limits
 │   │   ├── errors.ts    # Error codes, error mapping from GitHub API
+│   │   ├── slug.ts      # Filename slug generation (generateSlug, pure/deterministic)
 │   │   └── frontMatter.ts # Front matter generation and parsing
 │   ├── web/             # React UI (Vite build target)
 │   │   ├── main.tsx
@@ -423,7 +424,7 @@ The UI displays `error.message` for the user and uses `error.retryable` to show/
 | Browser E2E tests | **Playwright** | Sign-in state, repository selection, read/create/update flows against a local or mocked backend |
 | Real GitHub integration tests | **Vitest** (opt-in) | Against a dedicated test repository; credentials from CI secrets or local env var `GITHUB_INTEGRATION_TOKEN` |
 
-**Vitest configuration:** `vitest.config.ts` with `environment: 'node'` for server tests and `environment: 'jsdom'` for web component tests.
+**Vitest configuration:** `vitest.config.ts` with `environment: 'node'` for server tests and `environment: 'jsdom'` for web component tests. The existing legacy characterization suite (`tests/characterization/`, 25 JavaScript tests, task 1.4) MUST remain in the include set and passing alongside the new suites.
 
 **Playwright configuration:** `playwright.config.ts` with a local backend fixture.
 
@@ -461,9 +462,17 @@ The UI displays `error.message` for the user and uses `error.retryable` to show/
 - `zod` (request validation)
 - `tsx` (TypeScript execution for server in development)
 
-**Package name:** `"gitdatnote"`.
+**npm scripts (introduced where their backing files exist — no placeholder or fake-passing scripts):**
+- `dev` (`vite`), `build` (`vite build`), `lint` (`eslint`), `test` (`vitest run`) — established in task 2.1.
+- `typecheck` (`tsc` against `tsconfig.web.json` + `tsconfig.server.json`) — added in task 2.2, once the tsconfigs exist.
+- `test:e2e` (`playwright test`) — added in task 2.7, together with `playwright.config.ts`.
+- `test:integration` (opt-in real-GitHub suite) — added in task 5.1, together with the `integration/` harness.
 
-**Node version:** **Node.js 24 LTS** is the target runtime for the initial project. It is documented in `package.json` `engines` (`"node": ">=24"`), setup docs, and CI. End-of-life Node.js releases MUST NOT be targeted. (LTS line confirmed at implementation time; if a newer LTS exists when implementation begins, use it instead.)
+**Package name:** `gitdatnote`.
+
+**Node version:** **Node.js 24 LTS** is the minimum supported runtime. It is documented in `package.json` `engines` (`"node": ">=24"`), setup docs, and CI. **CI MUST verify on both Node 24 LTS and Node 26.** End-of-life Node.js releases MUST NOT be targeted.
+
+**Dependency security (Phase 2 gate — task 2.10):** Before Phase 2 is complete, run a targeted `npm audit` review. Known high and critical vulnerabilities reachable from the runtime tree (the `octokit` tree ReDoS advisories; `jws` via `@octokit/app`) MUST be fixed with non-breaking updates where a fix exists. Remaining high/critical entries (currently dev-tooling only: `happy-dom`, `tinypool`/`vitest`, `esbuild`) may stand as documented exceptions in `audit.md` when a fix requires a breaking-major upgrade the verification battery cannot absorb; each exception records rationale and a follow-up. `npm audit fix --force` and broad forced upgrades are prohibited.
 
 ---
 
@@ -482,7 +491,7 @@ The UI displays `error.message` for the user and uses `error.retryable` to show/
 ## Open Questions
 
 All previously open questions are now resolved:
-- ~~Hosting/runtime environment~~ → Node.js 18+ (LTS), self-hosted.
+- ~~Hosting/runtime environment~~ → Node.js 24 LTS minimum (`engines: "node": ">=24"`), CI-verified on 24 and 26; self-hosted.
 - ~~GitHub App registration/distribution~~ → Operator registers their own App; setup docs provided.
 - ~~Repository and content-root selections~~ → Per-repo content root, default `src/posts`, configurable.
 - ~~Legacy tests worth porting~~ → No existing tests. See audit.
@@ -494,6 +503,7 @@ No open questions remain for this change.
 - Mocked GitHub unit tests (Vitest) for all validation, error mapping, and content service logic.
 - Opt-in integration tests against an isolated dedicated test repository.
 - Failure-case tests: authorization denied, token expired/revoked, invalid paths (traversal, absolute, null byte), SHA mismatches, duplicate create, rate limits, CSRF missing/invalid, UTF-8 round-trip, content too large.
-- CI runs: lint, typecheck, build, unit tests, mocked integration tests.
+- CI runs on a **Node 24 LTS + Node 26 matrix**: install, lint, typecheck (web + server), build, unit tests (including the 25 legacy characterization tests), mocked integration tests.
+- **Targeted dependency-security review before Phase 2 completion (task 2.10):** non-breaking fixes for runtime-reachable high/critical advisories; documented exceptions only for breaking-major dev-tooling fixes; no `npm audit fix --force`.
 - Playwright E2E: sign-in state, repository selection, read, create, update flow.
 - No automated commits to SecondBrain or any production repository.

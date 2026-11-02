@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Repeatable local development environment
-The system SHALL provide documented commands to install dependencies, run the frontend and backend, check types, lint, and run automated tests. The documented environment SHALL require **Node.js 24 LTS** (not an end-of-life release) and a configured GitHub App (see `github-connection` spec).
+The system SHALL provide documented commands to install dependencies, run the frontend and backend, check types, lint, and run automated tests. The documented environment SHALL require **Node.js 24 LTS as the minimum supported version** (not an end-of-life release) and a configured GitHub App (see `github-connection` spec). Continuous integration SHALL verify the full gate set on **both Node 24 LTS and Node 26**.
 
 #### Scenario: New contributor starts locally
 - **GIVEN** a supported Node environment (24 LTS) and documented configuration including GitHub App credentials and session encryption key
@@ -14,6 +14,11 @@ The system SHALL provide documented commands to install dependencies, run the fr
 - **GIVEN** dependencies installed and environment variables set
 - **WHEN** the contributor runs the development command
 - **THEN** the Vite dev server serves the frontend and the Node backend is reachable via the configured proxy
+
+#### Scenario: CI verifies on supported Node versions
+- **GIVEN** a CI workflow defining a Node 24 LTS and Node 26 matrix
+- **WHEN** CI runs on a proposed change
+- **THEN** install, lint, typecheck, build, and unit tests pass on every matrix version
 
 ### Requirement: Single-package TypeScript project structure
 The project SHALL use a single-package TypeScript architecture with `src/web` (React/Vite), `src/server` (Node backend), and `src/shared` (platform-agnostic types, validation, and error domain). Shared code MUST NOT depend on browser or Node-specific APIs.
@@ -66,3 +71,11 @@ The repository SHALL expose repeatable lint, type-check, build, and test command
 - **GIVEN** a CI environment without the `GITHUB_INTEGRATION=true` flag
 - **WHEN** CI runs
 - **THEN** real GitHub integration tests are skipped and do not block the build
+
+### Requirement: Targeted dependency-security review
+Before Phase 2 is considered complete, the dependency tree SHALL contain no unaddressed high or critical vulnerability reachable from the runtime tree; known high and critical vulnerabilities MUST be fixed where practical by non-breaking updates. Any remaining high or critical vulnerability SHALL be a documented exception in `audit.md` with the reason for deferral and a follow-up, and security fixes MUST NOT rely on forced broad upgrades.
+
+#### Scenario: Dependency security review gate
+- **GIVEN** the Phase 2 implementation is complete
+- **WHEN** the targeted dependency-security review runs `npm audit`
+- **THEN** runtime-reachable high and critical vulnerabilities are fixed by non-breaking updates, and every remaining high or critical entry is a documented exception in `audit.md`
