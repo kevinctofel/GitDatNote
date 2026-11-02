@@ -366,3 +366,81 @@ Tested with a **hoisted `octokit` module mock** (no real GitHub API requests).
 - No other application source files were changed; no replacement editing/image-upload
   functionality was implemented (future home: repository-content service, tasks 4.x).
 - `git status` confirms only the two intended deletions are staged-for-commit (uncommitted).
+
+---
+
+## Dependency Modernization — Task 2.1
+
+> Recorded 2026-11-01 on branch `feat/gitdatnote-2` (starting commit `9f51ba9`). Goal: clean up
+> and modernize project dependencies, package metadata, and npm scripts.
+
+### `package.json` changes
+| Change | Detail |
+|---|---|
+| Name | `11tycms` → **`gitdatnote`** |
+| `engines` | added: `"node": ">=24"` (Node.js 24 LTS minimum, per design) |
+| Removed deps | **`node` ^21.1.0** (runtime, not a package), **`react-scripts` ^5.0.1** (CRA; app is Vite), **`react-error-overlay` ^6.0.9** (CRA dev overlay) and its `resolutions` pin, **duplicate `dotenv`** in `devDependencies` (kept single copy in `dependencies`) |
+| Added deps (runtime) | **`better-sqlite3` ^13.0.3** (session DB; native module, prebuilt binaries), **`dompurify` ^3.4.17** (Markdown preview sanitization), **`zod` ^4.6.7** (request validation) |
+| Added deps (dev) | **`@playwright/test` ^1.64.1** (e2e), **`tsx` ^4.23.15** (server dev execution), **`@types/node` ^24.0.0** (resolves 24.19.2 — pinned to the Node 24 floor, not latest 26.x, to match `engines`) |
+| Already present (task 1.4) | `typescript` ^5.7.2, `vitest` ^2.1.9 — kept at their versions; no other versions changed |
+
+Version selection: latest stable on npm at implementation time. Engine floors verified:
+`@playwright/test` ≥20, `better-sqlite3` ≥22, `tsx` ≥18 — all satisfied by the `>=24` floor.
+**Node 26 compatibility** verified in-place: running environment is Node v26.7.0; install, build,
+all 25 tests, and a live `better-sqlite3` native-module load (`SELECT 1` on an in-memory DB) all
+succeed on Node 26.
+
+### `package-lock.json` (intentional regeneration via `npm install`)
+- **1536 → 507 packages (net −1029).** Removed **1,064** — the entire react-scripts/babel/webpack/CRA tree, the bogus `node` package, and `react-error-overlay`.
+- Added **35** — `@playwright/test` + `playwright` + `playwright-core`; `better-sqlite3` + `node-addon-api`; `dompurify`; `zod`; `tsx` + its private `esbuild` 0.28.2 tree; `@types/node`.
+- **Version changes: 2**, both expected from adding `@types/node`: `@types/node` 22.10.2 → 24.19.2 and its transitive `undici-types` 6.20.0 → 7.24.6.
+- **Zero unrelated upgrades**: every previously locked package kept its exact version (react 18.3.1, vite 4.5.5, vitest 2.1.9, typescript 5.7.2, eslint 8.57.1, marked 11.2.0, octokit 3.2.1, slugify 1.6.6, dotenv 16.4.7, happy-dom 15.11.7, etc.).
+- `npm ls --depth=0` → clean tree, exit 0 (no missing/invalid/peer conflicts).
+
+### npm scripts
+Established and verified (real checks, all exercised):
+| Script | Command | Status |
+|---|---|---|
+| `dev` | `vite` | existing, kept |
+| `build` | `vite build` | verified exit 0 |
+| `lint` | `eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0` | script kept, but currently **broken by pre-existing config defect** (see below) |
+| `test` | `vitest run` | verified 25/25 |
+| `preview` | `vite preview` | existing, kept |
+
+**Deferred (documented, no placeholder scripts created)** — each depends on files from later tasks:
+| Script | Blocked by | Reason |
+|---|---|---|
+| `typecheck` | task 2.2 | needs `tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json` (created in 2.2) |
+| `test:e2e` | task 2.7 (+ Playwright browsers) | needs `playwright.config.ts` and e2e specs; browsers installed via `npx playwright install` |
+| `test:integration` | tasks 5.x | needs the integration test suite and mocked GitHub fixtures |
+
+### Security findings (`npm audit`, not fixed in this task)
+**25 vulnerabilities (1 low, 10 moderate, 11 high, 3 critical).** Placement:
+- **Runtime-reachable** (via `octokit` 3.2.1, used by current and planned server code):
+  `@octokit/endpoint`, `@octokit/plugin-paginate-rest`, `@octokit/request`, `@octokit/request-error`
+  (4× moderate ReDoS) and **`jws` 3.2.2 (high, improper HMAC verification)** via
+  `@octokit/app → @octokit/auth-app → universal-github-app-jwt → jsonwebtoken`.
+- **Dev-only** (test/build tooling): eslint tree (`ajv`, `js-yaml`, `flatted`, `brace-expansion`,
+  `minimatch`), vite/vitest tree (`esbuild`, `postcss`, `nanoid`, `rollup` 3.x), and the 3 criticals:
+  **`happy-dom` 15.11.7 (VM-context-escape RCE)**, **`tinypool` (vitest 2.1.9)** and **`esbuild`
+  dev-server (via vite 4.5.5 / vite 5.4.21)** — criticals all require **breaking** majors
+  (`happy-dom` 21.0.4, `vitest` 5.0.5).
+- Per instruction, **`npm audit fix --force` was not run**, and the broad non-breaking
+  `npm audit fix` was **deferred** to avoid unrelated transitive upgrades (instruction 8).
+  Recommendation: a dedicated security/upgrade pass (e.g., during/after the 2.x foundation)
+  targeting: `octokit` tree (runtime), then `vitest` 5 + `happy-dom` 21 majors, then the eslint/vite
+  transitive set.
+
+### Pre-existing issues found (not fixed in this task)
+- **`npm run lint` fails (exit 2, config error, not code errors):** `.eslintrc.cjs` contains an
+  invalid top-level property `node: true` (legacy CRA-template remnant; correct form is
+  `env: { node: true }`). Task 2.9 rewrites the ESLint config for TypeScript and will fix this.
+- **Playwright browsers not installed** — package install only downloads the driver; browser
+  binaries are a 2.7 concern (`npx playwright install`, `playwright.config.ts`).
+
+### Task 2.1 status
+**Left unchecked** — all `package.json` acceptance criteria (name, removals, additions, `engines`,
+working `dev`/`build`/`lint`/`test` scripts) are met, but the **essential script requirements**
+`typecheck`, `test:e2e`, and `test:integration` cannot perform real checks without files created in
+tasks 2.2, 2.7, and 5.x respectively. Per the assignment, 2.1 is updated only when its acceptance
+criteria are fully met; the dependency is reported here.
