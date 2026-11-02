@@ -249,6 +249,7 @@ Response `200`:
       "owner": "string",
       "name": "string",
       "contentRoot": "string",
+      "canRead": true,
       "canWrite": true,
       "private": false
     }
@@ -334,7 +335,7 @@ Response `200`:
 
 Response `403`: Repository not authorized or invalid CSRF.
 Response `404`: File not found.
-Response `409`: SHA mismatch (concurrent modification).
+Response `409`: SHA mismatch (concurrent modification). The response `error` object includes `currentSha`, the file's current blob SHA (see Error Response Format below).
 Response `422`: Invalid path or content too large.
 
 #### Error Response Format (all error responses)
@@ -349,6 +350,8 @@ Response `422`: Invalid path or content too large.
 }
 ```
 
+`SHA_CONFLICT` responses add one field to the `error` object: `currentSha`, the file's current blob SHA (the `repository-content` specification requires the current SHA to be included in a stale-update `409` response so the client can rebase).
+
 #### Error Codes
 | Code | Status | Meaning | Retryable |
 |---|---|---|---|
@@ -358,7 +361,7 @@ Response `422`: Invalid path or content too large.
 | `PATH_INVALID` | 422 | Path is absolute, contains traversal, null bytes, or escapes content root | No |
 | `FILE_NOT_FOUND` | 404 | File does not exist | No |
 | `FILE_EXISTS` | 409 | Create targeted an existing path | No |
-| `SHA_CONFLICT` | 409 | Expected SHA does not match current file SHA | No |
+| `SHA_CONFLICT` | 409 | Expected SHA does not match current file SHA (response `error` includes `currentSha`) | No |
 | `CONTENT_TOO_LARGE` | 422 | Content exceeds the size limit | No |
 | `RATE_LIMITED` | 429 | GitHub API rate limit exceeded | Yes |
 | `GITHUB_UNAVAILABLE` | 502 | GitHub API unreachable or returned a server error | Yes |

@@ -51,7 +51,11 @@ export type PathValidationResult =
  *   non-empty path.
  *
  * `contentRoot` comes from server-side configuration (trusted), but is
- * still checked for `..`/control characters defensively.
+ * still validated defensively: absolute roots, backslashes, control
+ * characters, and `..` sequences that would escape the repository root
+ * are all rejected. Given a valid root and a valid relative path, the
+ * joined repository path is guaranteed to stay within the configured
+ * content root — no lexical step in this function can resolve outside it.
  */
 export function validateContentPath(
   contentRoot: string,
@@ -63,7 +67,12 @@ export function validateContentPath(
     error: defaultDetail('PATH_INVALID'),
   });
 
-  if (hasControlCharacters(contentRoot) || canonicalSegments(contentRoot).escaped) {
+  if (
+    hasControlCharacters(contentRoot) ||
+    contentRoot.includes('\\') ||
+    contentRoot.startsWith('/') ||
+    canonicalSegments(contentRoot).escaped
+  ) {
     return invalid();
   }
   if (hasControlCharacters(relativePath)) return invalid();

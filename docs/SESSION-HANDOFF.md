@@ -1,9 +1,9 @@
 # Session Handoff — `modernize-gitdatnote-foundation`
 
 **Date:** 2026-11-02 · **Branch:** `feat/gitdatnote-2` (HEAD `b927bca` — task 2.9 committed by user; **task 2.3 done, on disk, uncommitted**)
-**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. **Task 2.2 done + committed by user as `974a8d1`** (`tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json`, `vite.config.ts` (React + `/api` proxy), `vitest.config.ts` (25 legacy tests retained), real `typecheck` script — all verified green). **Task 2.9 done + committed by user as `b927bca`:** ESLint working — `.eslintrc.cjs` fixed (top-level `node` moved into `env`), `@typescript-eslint` 8.72.1 parser+plugin, `ts,tsx` in the lint script, `ignorePatterns` for `dist`/`dist-server`/`node_modules`; 4 dead-code fragments removed from legacy sources + one per-file `prop-types` override on `Post.jsx`; `npm run lint` exit 0. **Task 2.3 done (on disk, uncommitted):** all five `src/shared/` modules created — `types.ts`, `validate.ts`, `errors.ts`, `frontMatter.ts`, `slug.ts` — pure, platform-independent strict TypeScript, no new dependencies; all verification green (lint/typecheck/25 tests/build/openspec validate). Change is **not archived**; task 2.4 **not started**.
+**Status:** **tasks 1.1–1.5 done + committed**; **task 2.1 done + committed by user as `6dde9f4`** and marked `[x]` with full evidence during the Phase 2 review. **Phase 2 review refinement applied** (OpenSpec/docs only): 2.1 split into completed evidence vs deferred scripts (`typecheck`→2.2, `test:e2e`→2.7, `test:integration`→5.1); task 2.9 moved immediately after 2.2 in the recommended order; 2.3 now implements `slug.ts` explicitly (tested by 2.6); 2.5 limited to a minimal functional React shell; 2.8 carries the Node 24 + 26 CI matrix (min Node stays 24); new task 2.10 = targeted dependency-security review checkpoint gating Phase 2 completion. **Task 2.2 done + committed by user as `974a8d1`** (`tsconfig.json`/`tsconfig.web.json`/`tsconfig.server.json`, `vite.config.ts` (React + `/api` proxy), `vitest.config.ts` (25 legacy tests retained), real `typecheck` script — all verified green). **Task 2.9 done + committed by user as `b927bca`:** ESLint working — `.eslintrc.cjs` fixed (top-level `node` moved into `env`), `@typescript-eslint` 8.72.1 parser+plugin, `ts,tsx` in the lint script, `ignorePatterns` for `dist`/`dist-server`/`node_modules`; 4 dead-code fragments removed from legacy sources + one per-file `prop-types` override on `Post.jsx`; `npm run lint` exit 0. **Task 2.3 done (on disk, uncommitted):** all five `src/shared/` modules created — `types.ts`, `validate.ts`, `errors.ts`, `frontMatter.ts`, `slug.ts` — pure, platform-independent strict TypeScript, no new dependencies; all verification green (lint/typecheck/25 tests/build/openspec validate). **Code-review corrections applied (2026-11-02, independent review of `ed0516c`):** content roots now reject absolute/backslash/root-escaping values; `buildFrontMatter` rejects YAML-sensitive control characters; date validation checks calendar validity and time/offset ranges; `Repository` gains explicit `canRead`; `SHA_CONFLICT` response shape defined with `currentSha` and documented in `design.md`; 17 scoped regression tests added — full battery re-run green. Change is **not archived**; task 2.4 **not started**.
 **Validation:** `openspec validate modernize-gitdatnote-foundation` → **exit 0, "Change ... is valid"** (2 non-blocking length warnings).
-**Tests:** `npm run test` → **25/25 passing** (`tests/characterization/legacy-behavior.test.js`).
+**Tests:** `npm run test` → **42/42 passing** (25 legacy in `tests/characterization/legacy-behavior.test.js` + 17 correction regressions in `tests/characterization/shared-modules-corrections.test.js`).
 **Build:** `npm run build` → exit 0 (113 modules; unchanged output, same asset hashes, after the Vitest dependency change AND after the 1.5 deletions).
 
 ## Completed tasks with evidence
@@ -67,6 +67,25 @@
 
 **2.3 verification (2026-11-02):** `npm run lint` exit 0 (`src/shared` confirmed in scope via direct lint run); `npm run typecheck` exit 0 (both tsconfigs include `src/shared` — relative imports use explicit `.js` extensions for `NodeNext`/`bundler` compatibility); `npm run test` 25/25 legacy tests pass (unchanged); `npm run build` exit 0 (unchanged asset hashes); `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean. Runtime behavior of all exports verified via a throwaway `tsx` probe (~65 assertions, deleted after use); no vitest include-set changes — the unit-test matrix is task 2.6. No new dependencies; no imports from `src/web`/`src/server`; no fs/DOM/Node APIs.
 
+## Task 2.3 code-review corrections (on disk, uncommitted, 2026-11-02)
+
+Independent review of commit `ed0516c`. Narrowly scoped pass; no task 2.4/2.5/2.6 work, no backend conflict handling, no new dependencies.
+
+| File | Correction |
+|---|---|
+| `src/shared/validate.ts` | Content root itself now validated: rejects absolute roots, backslashes, control characters, and roots whose lexical canonicalization escapes the repository root. Nested roots preserved; internally resolvable `..` in user paths still allowed (approved canonicalization kept) |
+| `src/shared/frontMatter.ts` | Rejects YAML-sensitive control characters (C0 except tab/LF/CR, plus DEL) in title/description/tags before emitting; serializer kept, no YAML dependency |
+| `src/shared/frontMatter.ts` | `isIsoDate` now validates calendar dates (leap years, per-month day counts) and time/offset component ranges; accepted forms unchanged; accepted strings never normalized |
+| `src/shared/types.ts` | `Repository` gains explicit `canRead: boolean` (design A-01 + github-connection spec require both `canRead` and `canWrite`) |
+| `src/shared/types.ts` | `ShaConflictErrorDetail` (`code: 'SHA_CONFLICT'`, `currentSha: string`) + `ShaConflictErrorResponse` — minimal type-safe shape for the spec-required `409` current SHA |
+| `src/shared/errors.ts` | `shaConflictDetail(currentSha)` + `toShaConflictResponse(currentSha)` constructors; explicit construction so `code` narrows to `'SHA_CONFLICT'` |
+| `design.md` | API example shows `canRead` + `canWrite`; Error Response Format documents `currentSha` on `SHA_CONFLICT`; `PUT .../content` 409 line and error-codes table row reference it |
+| `tests/characterization/shared-modules-corrections.test.js` | new — 17 scoped regression tests (malformed content roots, root-escape invariant, YAML control chars, invalid calendar dates/time components, conflict response shape) |
+| `openspec/.../tasks.md` | 2.3 Evidence extended with corrections addendum (still `[x]`) |
+| `openspec/.../audit.md` | "Task 2.3 Code Review Corrections (2026-11-02)" section |
+
+**Correction verification (2026-11-02, post-pass):** `npm run lint` exit 0; `npm run typecheck` exit 0 (both tsconfigs); `npm run test` 42/42 (25 legacy + 17 corrections); `npm run build` exit 0; `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean. Every corrected case additionally verified with a `tsx` probe before the tests were written (probe deleted after use). No unrelated files touched (the uncommitted `.hermes/skills/openspec-apply-change/SKILL.md` modification was left alone).
+
 ## Files modified for task 2.1 (committed as `6dde9f4`)
 
 | File | Change |
@@ -109,7 +128,7 @@
 cd /home/kct/Projects/GitDatNote
 git switch feat/gitdatnote-2
 /home/kct/.local/bin/openspec validate modernize-gitdatnote-foundation   # expect: valid
-npm run test                                                            # expect: 25 passing
+npm run test                                                            # expect: 42 passing
 npm run build                                                           # expect: exit 0
 npm ls --depth=0                                                        # expect: clean tree
 grep -nE '^\s*- \[(x| )\]' openspec/changes/modernize-gitdatnote-foundation/tasks.md

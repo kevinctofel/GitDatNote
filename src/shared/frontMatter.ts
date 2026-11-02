@@ -53,6 +53,7 @@ export function buildFrontMatter(meta: FrontMatterMeta): string {
   if (typeof title !== 'string' || title.trim() === '') {
     throw new Error('buildFrontMatter: title must be a non-empty string');
   }
+  assertNoUnsafeControlChars(title, 'title');
   if (!isIsoDate(date)) {
     throw new Error('buildFrontMatter: date must be an ISO 8601 date string');
   }
@@ -60,6 +61,7 @@ export function buildFrontMatter(meta: FrontMatterMeta): string {
   const lines: string[] = ['---', `title: ${quoteYaml(title)}`];
 
   if (typeof description === 'string' && description !== '') {
+    assertNoUnsafeControlChars(description, 'description');
     lines.push(`description: ${quoteYaml(description)}`);
   }
 
@@ -70,6 +72,7 @@ export function buildFrontMatter(meta: FrontMatterMeta): string {
       if (typeof tag !== 'string' || tag.trim() === '') {
         throw new Error('buildFrontMatter: tags must be non-empty strings');
       }
+      assertNoUnsafeControlChars(tag, 'tags');
     }
     lines.push(`tags: [${tags.map(quoteYaml).join(', ')}]`);
   }
@@ -96,12 +99,59 @@ function quoteYaml(value: string): string {
 
 /**
  * Accept ISO 8601 date or date-time forms (with optional fractional
- * seconds and timezone offset/Z). These forms contain no YAML-sensitive
- * sequences, so they are safe to emit unquoted.
+ * seconds and a `Z` or `±HH:mm` offset), and verify the calendar date and
+ * time components are real values: month 01-12, day valid for the month
+ * and year (including leap years), hour 00-23, minute/second 00-59, and
+ * offset hour 00-23 / offset minute 00-59. Invalid calendar dates such as
+ * `2024-02-31` and out-of-range components such as `T24:00:00` are
+ * rejected. Accepted strings are never normalized or rewritten.
  */
 function isIsoDate(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?)?$/.test(value)
+  if (typeof value !== 'string') return false;
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))?)?$/,
   );
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > daysInMonth(year, month)) return false;
+  if (match[4] !== undefined) {
+    if (Number(match[4]) > 23) return false;
+    if (Number(match[5]) > 59) return false;
+    if (Number(match[6]) > 59) return false;
+    if (match[7] !== undefined) {
+      if (Number(match[8]) > 23) return false;
+      if (Number(match[9]) > 59) return false;
+    }
+  }
+  return true;
+}
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2 && isLeapYear(year)) return 29;
+  return DAYS_IN_MONTH[month - 1];
+}
+
+/**
+ * Reject YAML c0-control characters (0x00-0x1F) other than tab, LF, and
+ * CR — which `quoteYaml` escapes — and DEL (0x7F). Control characters in
+ * metadata are almost always corruption, so rejecting them keeps the
+ * serializer trivially correct without adding escaping surface.
+ */
+function assertNoUnsafeControlChars(value: string, field: string): void {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    const escapable = code === 0x09 || code === 0x0a || code === 0x0d;
+    if ((code < 0x20 && !escapable) || code === 0x7f) {
+      throw new Error(`buildFrontMatter: ${field} contains an unsafe control character`);
+    }
+  }
 }

@@ -17,6 +17,8 @@ export interface Repository {
    * forward slashes (e.g. `Journal`, `src/posts`).
    */
   contentRoot: string;
+  /** Whether the current user may read the repository. */
+  canRead: boolean;
   /** Whether the current user may write to the repository. */
   canWrite: boolean;
   /**
@@ -92,6 +94,25 @@ export interface ErrorDetail {
 /** The standard API error response body. */
 export interface ErrorResponse {
   error: ErrorDetail;
+}
+
+/**
+ * The `error` object of a `SHA_CONFLICT` response: the standard fields
+ * plus the file's current blob SHA. The `repository-content` specification
+ * requires that a stale update be rejected with `409 SHA_CONFLICT` and
+ * that the response "include the current SHA in the response", so the
+ * conflict response extends the standard error shape with exactly this
+ * one field.
+ */
+export interface ShaConflictErrorDetail extends ErrorDetail {
+  code: 'SHA_CONFLICT';
+  /** Current blob SHA of the file at the time of the conflict. */
+  currentSha: string;
+}
+
+/** API error response body for `SHA_CONFLICT` (409). */
+export interface ShaConflictErrorResponse {
+  error: ShaConflictErrorDetail;
 }
 
 /**

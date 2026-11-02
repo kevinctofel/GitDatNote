@@ -8,7 +8,14 @@
  * HTTP server/middleware is intentionally out of scope (later tasks).
  */
 
-import type { ErrorDomain, ErrorStatus, ErrorResponse, ErrorDetail } from './types.js';
+import type {
+  ErrorDomain,
+  ErrorStatus,
+  ErrorResponse,
+  ErrorDetail,
+  ShaConflictErrorDetail,
+  ShaConflictErrorResponse,
+} from './types.js';
 
 /** Status and retryability of each error code (API contract). */
 export const ERROR_CODES: Readonly<
@@ -137,4 +144,26 @@ function rateLimitedDetail(context: GithubErrorContext): ErrorDetail {
 /** Wrap an `ErrorDetail` in the standard API error response body. */
 export function toErrorResponse(detail: ErrorDetail): ErrorResponse {
   return { error: detail };
+}
+
+/**
+ * Build a `SHA_CONFLICT` error detail that carries the file's current blob
+ * SHA. The `repository-content` specification requires that a stale update
+ * be rejected with `409 SHA_CONFLICT` and that the response "include the
+ * current SHA in the response".
+ */
+export function shaConflictDetail(currentSha: string): ShaConflictErrorDetail {
+  const meta = ERROR_CODES['SHA_CONFLICT'];
+  return {
+    code: 'SHA_CONFLICT',
+    message: SAFE_MESSAGES['SHA_CONFLICT'],
+    retryable: meta.retryable,
+    status: meta.status,
+    currentSha,
+  };
+}
+
+/** Wrap a `SHA_CONFLICT` detail in the API response body for that code. */
+export function toShaConflictResponse(currentSha: string): ShaConflictErrorResponse {
+  return { error: shaConflictDetail(currentSha) };
 }
