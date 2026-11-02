@@ -13,18 +13,6 @@ async function getPostTitles() {
     }
   );
 
-  let postInfo = async (title) => {
-    let data = await octokit.request(
-      "GET /repos/{owner}/{repo}/contents/Journal/2024/December/{file}",
-      {
-        owner: "kevinctofel",
-        repo: "SecondBrain",
-        file: title,
-      }
-    );
-
-    console.log(atob(data.data));
-  };
   let posts = [];
 
   listOfPosts.data.map((post) => {

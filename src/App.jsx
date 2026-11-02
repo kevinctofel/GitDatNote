@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import "./App.css";
 import getPostTitles from "./components/getPostTitles";
 import newPost from "./components/newPost";
@@ -46,7 +46,7 @@ function App() {
 
   // TODO - Fix this code for populating the post content with
   // an old post
-  const populateTextArea = (index) => {
+  const populateTextArea = () => {
     console.log("old post content");
     // console.log(title);
     document.getElementById("postTitle").innerHTML = "Old post title"; 

@@ -1,5 +1,4 @@
 import { Octokit } from "octokit";
-import App from "../App.jsx";
 import buildFrontMatter from "./buildFrontMatter.js";
 import slugify from "slugify";
 async function newPost(postTitle, postContent) {

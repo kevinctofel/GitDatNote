@@ -464,3 +464,27 @@ criteria are fully met; the dependency is reported here.
 **Legacy compatibility:** none introduced. The legacy app continues to run through Vite/esbuild exactly as before; typechecking does not touch it until task 2.5 migrates sources.
 
 **Not done (out of scope):** ESLint TypeScript config (task 2.9 — `npm run lint` still fails on the pre-existing invalid `.eslintrc.cjs`); first `src/shared`/`src/server`/`src/web` modules (tasks 2.3/2.4/2.5); Playwright (task 2.7); CI (task 2.8).
+
+## ESLint Configuration — Task 2.9 (2026-11-02)
+
+**Scope:** working lint for existing JavaScript/JSX and new TypeScript/TSX, fixing the pre-existing `.eslintrc.cjs` defect.
+
+**Dependency change:** added `@typescript-eslint/parser` and `@typescript-eslint/eslint-plugin` (both resolve to 8.72.1) as devDependencies. ESLint stays at 8.57.1 — v8 of the plugin line is the ESLint-8-compatible line (v9+ requires ESLint 9). No other dependency touched; lockfile delta is only the two new trees.
+
+**Configuration decisions (`.eslintrc.cjs`):**
+1. **Fix:** invalid top-level `node: true` moved into `env: { browser: true, es2020: true, node: true }` (legacy CRA-template remnant; also covers server/tooling files and test globals).
+2. **TS override:** `files: ['*.ts', '*.tsx']` → `parser: @typescript-eslint/parser`, `extends: ['plugin:@typescript-eslint/recommended']`. Covers `vite.config.ts`, `vitest.config.ts` today and every `src/web`, `src/server`, `src/shared` file from tasks 2.3 onward. JSX/TSX handled by the same override (parser is JSX-aware) plus the inherited `react/jsx-runtime` + `react-hooks` settings.
+3. **ignorePatterns:** `dist`, `dist-server`, `node_modules`, `.eslintrc.cjs` (generated artifacts + dependencies explicitly excluded per task requirement).
+4. **Lint script:** `eslint . --ext js,jsx --report-unused-disable-directives --max-warnings 0` → `eslint . --ext js,jsx,ts,tsx --report-unused-disable-directives --max-warnings 0`. The extension list makes the script a real gate over TS files instead of silently skipping them (script names unchanged per the no-placeholder principle).
+5. **No broad rule-category disables.** Legacy-code handling was source fixes plus one narrow per-file override (below).
+
+**Legacy source fixes (behavior-neutral, documented):**
+- `src/App.jsx`: removed unused `useEffect` import (its only usage is commented out) and the unused `index` parameter of `populateTextArea` (call site passes no argument).
+- `src/components/Post.jsx`: removed unused `url` prop from destructuring (component renders only `title`).
+- `src/components/getPostTitles.js`: removed dead `postInfo` async function (assigned, never called — defect #7 in the task 1.4 table).
+- `src/components/newPost.js`: removed unused `import App from "../App.jsx"` (unused; its removal also eliminates the App→newPost→App circular import).
+- **Override:** `files: ['src/components/Post.jsx']` → `react/prop-types: off`. Rationale: the standard fix requires adding the deprecated `prop-types` package for a 7-line legacy component that task 2.5 replaces with a typed TSX component; not worth the dependency. One file, one rule, justified — not a broad disable.
+
+**Verification (2026-11-02):** `npm run lint` exit 0 (0 errors, 0 warnings under `--max-warnings 0`; `vite.config.ts`/`vitest.config.ts` confirmed in scope via a direct lint run); `npm run typecheck` exit 0; `npm run test` 25/25 pass; `npm run build` exit 0 (unchanged asset hashes); `openspec validate` exit 0; `git diff --check` clean.
+
+**Not done (out of scope):** npm-audit remediation (task 2.10); `test:e2e` (task 2.7); CI lint/typecheck matrix (task 2.8).
