@@ -5,6 +5,12 @@
  * - Never log GitHub access tokens, session cookies, or authorization headers.
  * - Never log request or response bodies (article content).
  * - Never log full query strings (they may carry sensitive data).
+ * - Never log raw request targets or raw path segments derived from them:
+ *   future sensitive or parameterized routes must log sanitized route
+ *   templates (e.g. `/api/articles/{id}`) rather than raw path segments. A
+ *   general-purpose routing or logging framework is intentionally not built
+ *   yet (out of scope for task 2.4). When a request target cannot be parsed
+ *   at all, request lines log the fixed marker `(unparseable)` instead.
  *
  * Request log lines therefore carry only: method, pathname, status, duration.
  * The log level is configurable via the `LOG_LEVEL` environment variable
@@ -74,7 +80,10 @@ export function createLogger(level: LogLevel): Logger {
 
 export interface RequestLogEntry {
   readonly method: string;
-  /** Request pathname only — never the query string. */
+  /**
+   * Request pathname only — never the query string. Fixed `(unparseable)`
+   * marker when the request target cannot be parsed at all.
+   */
   readonly path: string;
   readonly status: number;
   readonly durationMs: number;
