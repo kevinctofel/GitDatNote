@@ -27,6 +27,21 @@ In both branches, never create the root as a side effect: do not run `openspec i
 
 **Input**: Optionally specify a change name (e.g., `/openspec-apply-change add-auth`). If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
+**Assignment mode (standing pattern in this project)**
+
+Assignment mode: When the user explicitly assigns a single task, implement only that task. When the user assigns multiple tasks, respect the specified scope. Never proceed beyond the assigned tasks without authorization. For each assignment:
+
+1. **Initial checks:** confirm the expected branch, a clean working tree, and that the previously completed task is committed. Read only the governing artifacts — the relevant sections of `tasks.md`, `design.md`, the affected capability spec(s), and `docs/SESSION-HANDOFF.md`. Do not read unrelated files or the whole repository.
+2. **Implement only the assigned task(s).** Keep changes minimal and in scope; do not migrate, refactor, or begin later tasks' code. Never create placeholder scripts that report success without performing real checks — retain script names, but place their real implementation in the task that owns them.
+3. **Verification battery:** run the task's required commands, then `openspec validate <change>`, `git diff --check`, and `git status --short`. Report exact exit codes and test counts. If a check fails for out-of-scope legacy reasons, document the failure rather than refactoring unrelated source.
+4. **Update OpenSpec artifacts only when acceptance criteria are met:**
+   - `tasks.md`: for each completed task, mark its checkbox `- [x]` and append an `Evidence (date): ...` note at the end of its task line, preserving the original task text. Do not change other task checkboxes.
+   - `audit.md`: append a section with significant technical findings and any documented deviations from `design.md`.
+   - `docs/SESSION-HANDOFF.md`: update status, the changed-files table, deviations, and the next step for the next session.
+5. **Final report:** files created/modified; technical decisions and documented design deviations; test/typecheck/build results; legacy compatibility issues; OpenSpec validation result; whether each assigned task is complete; remaining blockers for the next task(s).
+
+**Stop after reporting.** Do not commit unless explicitly authorized, do not archive the change, and do not start any task outside the assigned scope without an explicit new assignment.
+
 **Steps**
 
 1. **Select the change**
@@ -181,12 +196,12 @@ What would you like to do?
 ```
 
 **Guardrails**
-- Keep going through tasks until done or blocked
+- Keep going through tasks until done or blocked — unless the assignment covers a defined scope of one or more tasks, in which case stop after reporting the assigned work (see Assignment mode)
 - Always read context files before starting (from the apply instructions output)
 - If task is ambiguous, pause and ask before implementing
 - If implementation reveals issues, pause and suggest artifact updates
 - Keep code changes minimal and scoped to each task
-- Update task checkbox immediately after completing each task
+- Update task checkbox immediately after completing each task, appending a short evidence note to the task line (commands run, results, deferrals); preserve the original task text
 - Pause on errors, blockers, or unclear requirements - don't guess
 - When a task needs work beyond what the spec describes, surface the added scope and pause - never silently narrow, defer, or simplify away specified behavior
 - Only mark a task `- [x]` when its specified behavior is fully implemented, not when it is partially done or deferred
@@ -197,6 +212,8 @@ What would you like to do?
 - Consider every guidance entry; explain any inapplicable or conflicting advice
 - Do not copy runtime context or operation guidance into implementation files or planning artifacts
 - Preserve CLI-controlled blocked/ready/all-done behavior and completion criteria
+
+- Edit OpenSpec artifact files (tasks.md, design.md, specs, audit.md, handoff docs) with exact-match replacement and per-edit count assertions — mechanics and pitfalls in `references/editing-openspec-files.md`
 
 **Fluid Workflow Integration**
 
