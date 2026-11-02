@@ -202,3 +202,124 @@ Template assets. Harmless; can be kept or removed.
 - **Environment limitation / caveat:** the build was verified on **Node v26.7.0**, which is newer than the project's target **Node 24 LTS** and newer than the stray `node@^21` dep. The build is not guaranteed reproducible on exactly 24 LTS until re-verified there; the obsolete dependency set (78 vulnerabilities, deprecated tooling) remains a risk.
 - **Dependency problems (for task 2.1):** remove `node` and `react-scripts`, de-duplicate `dotenv`, and declare any missing import (`node-base64-img`) — though `addImage.js` is slated for deletion, making that import moot.
 - **No source code was modified** to achieve this result; the build ran against the unmodified starting commit.
+
+---
+
+## Legacy Characterization Tests — Task 1.4
+
+> Recorded 2026-11-01 on branch `feat/gitdatnote-2`. Goal: write characterization tests
+> for reusable behavior in the original application, without refactoring. Tests live in
+> `tests/characterization/legacy-behavior.test.js` (run via `npm run test`, Vitest 2.1.9).
+> **Result: 25 tests, all passing.** No application source code was modified.
+
+### Testing infrastructure added
+- **Vitest 2.1.9** + **happy-dom 15.11.7** as devDependencies (chosen for compatibility with the
+  locked Vite 4.5.5 — Vitest 2.x supports Vite 4/5; a nested Vite 5.4.21 ships inside
+  `vite-node`/`vitest` and does not affect the app build).
+- `vitest.config.js`: include only `tests/characterization/**/*.test.js`, node environment.
+- `package.json`: `"test": "vitest run"` script. No other scripts or dependencies touched.
+
+**Lockfile review (lesson from task 1.3 applied):** `npm install` again attempted a spurious
+`typescript` downgrade (5.7.2 → 4.9.5). It was corrected with an explicit
+`npm install -D typescript@5.7.2`. Final lockfile delta vs. HEAD:
+- **0 packages removed; 112 added** (the Vitest/happy-dom trees only).
+- **Only 2 existing package versions changed**, both expected transitive upgrades pulled in by
+  Vitest's Vite-5 toolchain: `@jridgewell/sourcemap-codec` 1.5.0→1.6.0 and
+  `@types/estree` 1.0.6→1.0.10.
+- `typescript` preserved at 5.7.2. No other version drift.
+- Build re-verified after the dependency change: `npm run build` exit 0, identical output
+  (113 modules, same asset hashes).
+
+### A. Front matter generation — `src/components/buildFrontMatter.js` → `buildFrontMatter(title)`
+**Legacy behavior characterized (7 tests, all passing):**
+- Exact output for an ordinary title: `---\ntitle: <title>\ndate: <new Date().toISOString()>\n---\n`.
+- Emits **only** `title` and `date` — no description, no tags.
+- Date is full ISO 8601 with time and `Z` (e.g. `2024-12-01T12:00:00.000Z`), not `YYYY-MM-DD`.
+- Date fixed in tests by spying on `Date.prototype.toISOString` (the exact method the legacy
+  code calls). **Test-infrastructure finding:** `vi.spyOn(Date, "now")` does **not** affect
+  `new Date()` in the test environment, and `vi.unspyAll` does not exist in Vitest 2.1.9
+  (use `mockRestore()` on the spy).
+- **Characterized defects (documented, not fixed):**
+  - Titles containing `:` (e.g. `A: B`) are emitted **unquoted** → malformed YAML value.
+  - Titles starting with special characters (`*star*`) are unquoted.
+  - Titles containing newlines produce a multi-line, unquoted value that corrupts the front matter.
+
+### B. Slug generation — `slugify` (v1.6.6) as used in `src/components/newPost.js`
+Legacy usage: `postURL = slugify(postTitle)` then PUT to `path: ${postURL}.md`.
+**Characterized behavior (8 tests, all passing) — verified empirically:**
+- **Case is preserved** (no `lower: true` in legacy call): `"Hello World"` → `"Hello-World"`.
+- Whitespace runs collapse to a single `-`.
+- **Apostrophes are kept**: `"What's New?"` → `"What's-New"` (apostrophes end up in filenames).
+- **Some punctuation survives into slugs/filenames**: `"!!!"` → `"!!!"`, `"*star*"` → `"*star*"`,
+  `"A: B"` → `"A:-B"` — `*`, `!`, `:` are invalid characters in Windows filenames. Trailing
+  `.`/`!` also kept (`"Hello."` → `"Hello."`).
+- Trailing `?` is stripped; leading `--` is stripped.
+- **Unicode:** accented characters are transliterated to ASCII base (`"café"` → `"cafe"`,
+  `"résumé"` → `"resume"`); CJK characters are **stripped entirely** (no transliteration):
+  `"日本語"` → `""`.
+- **Collision risks identified:** distinct titles map to identical slugs (`"My Post"` =
+  `"My-Post"`; `"My Post."` = `"My-Post."`; `"Café"` = `"Cafe"`; `"日本語"` = `"???"` = `""`).
+  The legacy caller (`newPost.js`) PUTs directly to `<slug>.md` with **no existence check** —
+  a second post with the same slug silently overwrites the first. Documented only; no
+  replacement slug function implemented (out of scope per task).
+
+### C. Directory listing → post selection — `src/components/getPostTitles.js`
+Tested with a **hoisted `octokit` module mock** (no real GitHub API requests).
+**Characterized behavior (6 tests, all passing):**
+- Calls the hardcoded endpoint `GET /repos/{owner}/{repo}/contents/Journal/2024/December/`
+  with hardcoded `owner: "kevinctofel"`, `repo: "SecondBrain"`.
+- Maps directory entries whose `name` ends in `.md` to `{ title: name-without-.md, url: html_url, sha }`, preserving order.
+- Filters out non-`.md` entries (`.txt`, extension-less).
+- Empty directory → empty post list.
+- **Characterized defect:** entry `type` is ignored — a **directory** named `*.md` is treated as a post.
+- **Characterized limitation (not testable without refactoring):** the per-file helper
+  `postInfo` (single-file GET) is **dead code** — defined but never invoked; its behavior
+  cannot be characterized without substantial refactoring.
+- **Mocking finding (test-infrastructure pitfall):** `vi.restoreAllMocks()` in `afterEach`
+  also restores a `vi.mock`ed module's implementation, silently breaking subsequent module
+  mocks in the same file. Use `mockReset()` on the hoisted fn instead.
+
+### D. SHA-based conflict detection — **no functional conflict detection on the live path**
+**Finding (documented; no new functionality created):**
+- The live update path is `src/components/newPost.js` (called from `App.jsx`): a plain
+  `PUT /repos/{owner}/{repo}/contents/{path}` containing owner/repo/path/message/committer/
+  content/headers — **no `sha` field**. It silently overwrites existing files.
+- The only SHA-based update in the codebase is `src/components/updatePost.js`, which
+  reads a file then PUTs with `sha: data.data.sha`. However, it performs a **top-level
+  `await` at module scope** (executes on import, not on call) and hardcodes a *different*
+  repository (`MyConsciousStream`) and path — it is not part of any callable, testable
+  update flow. Executing the module to characterize it would hit the real GitHub API.
+- **Conclusion:** SHA-based conflict detection is effectively **absent** from the original
+  application's user-facing behavior.
+- **Cannot be characterized without refactoring:** the logic is entangled in module-scope
+  async code with hardcoded endpoints; it must first be extracted into a callable,
+  dependency-injected function.
+- **Appropriate future home:** the `repository-content` spec requirements "Create without
+  overwriting" (409 `FILE_EXISTS`) and "Update with expected SHA" (409 `SHA_CONFLICT`), to be
+  implemented in **tasks 4.3 (POST) and 4.4 (PUT)** of this change.
+
+### Defects / limitations summary
+| # | Area | Finding |
+|---|---|---|
+| 1 | A | `buildFrontMatter` emits unquoted YAML — titles with `:`, leading specials, or newlines produce corrupt front matter |
+| 2 | A | No `description`/`tags` fields (incomplete vs. modern post requirements) |
+| 3 | B | slugify keeps `*`, `!`, `:`, `'` in slugs → invalid filenames on Windows; case preserved (inconsistent with typical slug expectations) |
+| 4 | B | No collision handling in caller; same-slug posts silently overwrite each other |
+| 5 | B | CJK titles slug to `""` (empty filename body) |
+| 6 | C | `post.type` ignored — directories named `*.md` are listed as posts |
+| 7 | C | `postInfo` is dead code; not characterizable without refactoring |
+| 8 | C | Hardcoded owner/repo/path in `getPostTitles` — not parameterized |
+| 9 | D | No `sha` on the live PUT path — no conflict detection |
+| 10 | D | `updatePost.js` SHA pattern exists but is unreachable (module-scope await, wrong repo) |
+
+### Uncharacterized behavior (and why)
+- **`getPostTitles` error handling** (HTTP 404 for a missing journal directory, network failure):
+  the function has no try/catch; a rejected `request` promise would propagate as an unhandled
+  rejection. Not exercised by tests because it is not isolable without a failing-mock scenario
+  that would require asserting on unhandled-rejection behavior — deferred to the integration
+  work in Section 5 of this change.
+- **`updatePost.js`** executable behavior: module-scope `await` + hardcoded real-repo request
+  on import; executing it in a test would contact the real GitHub API. Requires refactoring
+  before it can be characterized.
+- **`App.jsx` render flow** (the `setHTML()` call): a React runtime concern requiring a full
+  component mount; out of scope for these module-level characterization tests.
