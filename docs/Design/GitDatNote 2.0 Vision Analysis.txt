@@ -1,0 +1,32 @@
+### Design Overview & Visual Identity
+GitDatNote employs a modern, calm editorial aesthetic tailored for developers and writers using GitHub and Eleventy. The interface relies on clean sans-serif typography, rounded cards (8–12px radius), ample whitespace, and a signature lavender/purple primary accent paired with neutral grays and soft ambient gradients along the top and bottom borders.
+
+---
+
+### 1. Dashboard
+* **Layout & Navigation:** Built on a classic two-column structure. The fixed left sidebar houses the brand identity (pen-nib logo), navigation items with counter badges (*Articles: 24*, *Drafts: 6*, *Published: 18*), secondary links (*Sites*, *Settings*, *Help*), and a bottom-anchored user profile (*Kevin Tofel*).
+* **Main Content Area:** The right panel opens with a bold “Articles” heading, an integrated search input, and a high-contrast “+ New Article” primary button. Sub-navigation tabs (*All*, *Drafts*, *Published*) and a sorting control sit directly above the feed.
+* **Visual Hierarchy & Distinctive Elements:** Articles are displayed as clean horizontal rows featuring an icon, bold post title, muted one-line excerpt, status badge (soft green for *Published*, gray for *Draft*), relative timestamp, and an overflow menu (`···`). The layout prioritizes quick scanning and content retrieval.
+
+---
+
+### 2. Article Editor
+* **Layout & Workspace:** A focused, two-column split view combining a distraction-free writing canvas with an inspector sidebar. The header bar displays breadcrumbs (*Articles / Writing with Markdown*), a *Draft* status pill, auto-save confirmation, a *Preview* button, and a split *Publish* dropdown.
+* **Writing Canvas:** Anchored by a contextual formatting toolbar (headings, bold, italics, links, code, lists, images). The editor features styled Markdown preview elements—such as bold purple H1/H2 headers (`#`, `##`) and clean body text—offering visual distinction without clutter.
+* **Sidebar Inspector:** Organized with top-level tabs (*Details*, *SEO*, *Options*). Under *Details*, vertically stacked form fields capture essential metadata: required text inputs (*Title*, *Slug*), a *Status* select menu, removable tag pills (*markdown ×*, *writing ×*), and an aspect-ratio-locked *Featured Image* preview equipped with floating edit and delete actions.
+
+---
+
+### 3. Onboarding (Connect GitHub)
+* **Layout & Structure:** A centered, split-panel setup wizard that simplifies initial configuration into digestible steps.
+* **Navigation & Progress:** The left column establishes clear visual momentum with a 4-step vertical stepper: *1. Connect GitHub* (highlighted in solid purple), followed by *Choose a repository*, *Configure site*, and *You’re ready!*.
+* **Card Element & Hierarchy:** The right panel focuses user attention via an elevated white card displaying the official GitHub logo, a bold action title, and concise copy. A full-width purple CTA (*Connect GitHub*) features an external link icon, underlined by a reassuring trust microcopy with a lock icon: *“Your content stays in your GitHub account.”*
+
+---
+
+### 4. Appearance Settings
+* **Layout & Hierarchy:** Retains the global sidebar while populating the workspace with a horizontal settings navigation bar (*General*, *Appearance*, *Publishing*, *GitHub*, *About*).
+* **Controls & Visual Elements:**
+  * **Theme Picker:** Presents a segmented three-card grid (*Light*, *Dark*, *System*) incorporating line icons and clear selection rings.
+  * **Accent Color Palette:** Displays circular color swatches representing the app's six calm accent tones: *Lavender (Default)*, *Sage*, *Ocean*, *Slate*, *Clay*, and *Teal*. An outer active ring and label identify the selected state.
+* **Spacing & Balance:** Generous vertical padding separates control groups, using clear section titles and muted subtext to maintain an uncluttered administrative interface.
