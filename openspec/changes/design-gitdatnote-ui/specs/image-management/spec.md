@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Repository-stored images
-Image files MUST be stored in the user's authorized GitHub repository under a per-repository/site configured image directory (default `Images/` at the repository root, configurable per site). Images MUST NOT be sent to an undocumented external hosting service.
+Image files MUST be stored in the user's authorized GitHub repository under a per-repository/site configured image directory (default `Images/` at the repository root, configurable per site). **The configured image directory MAY be located outside the Markdown content root.** Images MUST NOT be sent to an undocumented external hosting service.
 
 #### Scenario: No external host
 - **GIVEN** an image-insertion flow
@@ -84,7 +84,7 @@ A lightweight image browser MUST support images within the selected repository's
 - **AND** no thumbnails are claimed as loaded
 
 ### Requirement: Safe path and storage configuration
-Image paths MUST use safe relative paths, reusing shared path validation (reject absolute, traversal-escaping, and null-byte paths). Storage configuration MUST define: safe relative paths, repository permission checks, filename normalization, file-size limits, allowed content types, duplicate detection, existing-file conflict handling (never silent overwrite), safe Markdown URL generation, prevention of path traversal, and correct image paths for the configured Eleventy site.
+Image paths MUST use safe relative paths, reusing shared path validation (reject absolute, traversal-escaping, and null-byte paths). Image path validation and authorization are separate from content-root validation, and image writes MUST require repository write authorization. Safe Markdown URL generation MUST derive from the actual article path and image location.
 
 #### Scenario: Traversal rejected
 - **GIVEN** an image path attempt like `../../outside.png`
@@ -97,6 +97,23 @@ Image paths MUST use safe relative paths, reusing shared path validation (reject
 - **WHEN** an upload or insertion targets that name
 - **THEN** a conflict is surfaced for resolution
 - **AND** the existing file is not silently overwritten
+
+#### Scenario: Storage configuration defines required items
+- **GIVEN** the storage configuration for a site
+- **WHEN** image operations are performed
+- **THEN** the configuration defines safe relative paths, repository permission checks, filename normalization, file-size limits, allowed content types, duplicate detection, existing-file conflict handling (never silent overwrite), safe Markdown URL generation, prevention of path traversal, and correct image paths for the configured Eleventy site
+
+#### Scenario: Article-relative URL from actual paths
+- **GIVEN** an article at `<contentRoot>/journal/2026/11-02-2026.md` and an image at `<repoRoot>/Images/photo.webp`
+- **WHEN** the image reference is generated
+- **THEN** the Markdown URL is computed from the article's actual path to the image's actual location (here `../../../Images/photo.webp`)
+- **AND** no fixed `../Images/` example is assumed universal
+
+#### Scenario: Image write requires write authorization and stays in the image directory
+- **GIVEN** a repository without write authorization, or a target path outside the configured image directory
+- **WHEN** an image operation is attempted
+- **THEN** the operation is rejected (no write authorization, or the path escapes the image directory)
+- **AND** no file is written and no success is claimed
 
 ### Requirement: Implementation boundaries
 Functional image upload, image processing, and repository image management MUST be deferred until the appropriate authenticated GitHub repository image APIs exist. The MVP MUST NOT implement these. Never create image controls that imply a successful upload when none occurred.

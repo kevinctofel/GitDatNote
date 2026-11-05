@@ -18,7 +18,7 @@ The editor MUST give the Markdown writing surface (the writing canvas) the great
 - **AND** the inspector (Details/SEO/Options tabs) is present and collapsible
 
 ### Requirement: Title and status
-The editor MUST show a prominent article title input and a clear Draft/Published status control. The status control MUST reflect and control the front-matter status field.
+The editor MUST show a prominent article title input and a clear Draft/Published status control. The status control MUST reflect and control the front-matter status field, which the shared front-matter module MUST serialize via the **front-matter prerequisite task** (the module currently serializes only `title`/`description`/`date`/`tags` and has no `draft` field, so draft/status serialization is not yet available).
 
 #### Scenario: Publish flips status
 - **GIVEN** a draft article
@@ -58,7 +58,7 @@ The editor MUST provide a collapsible inspector with a Details tab (description,
 - **AND** it never implies an image was attached
 
 ### Requirement: Save and publish flow
-Save MUST keep the current status; Publish MUST set published and save. Both MUST use the create/update content endpoint with the CSRF header and shared front-matter generation, and MUST disable controls while in flight.
+Save MUST keep the current status; Publish MUST set published and save. Both MUST use the create/update content endpoint with the CSRF header and shared front-matter generation (**status/draft serialization from the front-matter prerequisite task**), and MUST disable controls while in flight.
 
 #### Scenario: Save success
 - **GIVEN** an edited existing article with a known blob SHA
@@ -82,7 +82,7 @@ The editor MUST protect unsaved changes with an in-app navigation guard and a `b
 - **AND** closing the tab triggers the browser's beforeunload prompt
 
 ### Requirement: Keyboard shortcuts and distraction-free mode
-The editor MUST support `Ctrl/Cmd+S` (save), `Ctrl/Cmd+B`/`Ctrl/Cmd+I` (bold/italic), `Ctrl/Cmd+K` (insert/edit link — reserved for link, not Insert Image), `Ctrl/Cmd+P` (publish with confirmation), and a focus-free (distraction-free) mode toggle that removes chrome and restores it on exit.
+The editor MUST support `Ctrl/Cmd+S` (save), `Ctrl/Cmd+B`/`Ctrl/Cmd+I` (bold/italic), `Ctrl/Cmd+K` (insert/edit link — reserved for link, not Insert Image), and a focus-free (distraction-free) mode toggle that removes chrome and restores it on exit. **Publish has no keyboard shortcut** — it is reachable only through the labeled split Publish control, and `Ctrl/Cmd+P` is deliberately left unbound so the browser's Print behavior is preserved.
 
 #### Scenario: Distraction-free toggle
 - **GIVEN** the editor open
@@ -97,3 +97,10 @@ The approved initial formatting toolbar is Bold, Italic, Insert Link, and Insert
 - **GIVEN** the editor open
 - **WHEN** edits are made and time passes
 - **THEN** no background save occurs and no "auto-saved" message is shown
+
+#### Scenario: No publish shortcut; browser Print preserved
+- **GIVEN** the editor open on an article
+- **WHEN** the user presses `Ctrl/Cmd+P`
+- **THEN** the editor performs no publish action
+- **AND** the browser's native Print behavior is available (the shortcut is left unbound)
+- **AND** publishing remains available via the labeled split Publish control

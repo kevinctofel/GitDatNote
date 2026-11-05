@@ -5,10 +5,11 @@
 ### Requirement: Four-step flow
 Onboarding MUST present a single-page, split-panel stepped flow: a left column with the four-step vertical stepper and a right elevated content card, in this order: (1) Connect GitHub, (2) Choose an authorized repository, (3) Configure the publishing site, (4) You're ready. A progress indicator MUST show the current step.
 
-#### Scenario: Happy path
-- **GIVEN** the GitHub App is installed and the user has at least one writable repository
+#### Scenario: Happy path (requires the site-config persistence endpoint)
+- **GIVEN** the GitHub App is installed, the user has at least one writable repository, **and the site-config persistence endpoint exists**
 - **WHEN** the user completes all four steps
-- **THEN** a site configuration is created and the dashboard opens with that repository selected
+- **THEN** the endpoint persists the site configuration and the dashboard opens with that repository selected
+- **AND** the success shown reflects a real server-persisted configuration
 
 #### Scenario: Connect card
 - **GIVEN** step 1 (Connect GitHub)
@@ -16,11 +17,17 @@ Onboarding MUST present a single-page, split-panel stepped flow: a left column w
 - **THEN** the card shows the GitHub logo and a full-width accent "Connect GitHub" CTA with an external-link icon
 - **AND** trust microcopy with a lock icon appears beneath the CTA
 
-#### Scenario: Stepper states and backend placeholder
+#### Scenario: Stepper visual states
 - **GIVEN** the onboarding flow
 - **WHEN** a step is active
 - **THEN** the active step is highlighted in solid accent and the right card shows that step's content
-- **AND** steps 3/4 are visual placeholders, because site-config persistence is a future backend/API dependency until a config endpoint exists
+
+#### Scenario: Placeholder state when the persistence endpoint is absent
+- **GIVEN** the onboarding flow, and the site-config persistence endpoint does not yet exist
+- **WHEN** the user completes all four steps
+- **THEN** steps 3/4 render as a visual placeholder (selection summary) and the dashboard opens with the repository selected
+- **AND** no persistent site configuration is claimed as saved
+- **AND** no success message implies persistence occurred (no false success, no invented persistence)
 
 ### Requirement: Connect step permissions
 The Connect step MUST explain that GitDatNote requests Contents read/write and Metadata read, only for repositories the user selects, and MUST NOT request or imply repository-creation permission.
