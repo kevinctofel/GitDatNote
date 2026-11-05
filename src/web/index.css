@@ -1,0 +1,132 @@
+/* Minimal, accessible shell styling for foundation task 2.5.
+ * Basic readability + keyboard focus only — no design system or theme tokens. */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+}
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  background: #ffffff;
+  color: #1a1a1a;
+  line-height: 1.5;
+}
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #141414;
+    color: #f2f2f2;
+  }
+}
+
+.app {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  border-bottom: 1px solid #d0d0d0;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+@media (prefers-color-scheme: dark) {
+  .app-header {
+    border-color: #3a3a3a;
+  }
+}
+.app-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.session-user {
+  color: #555;
+}
+@media (prefers-color-scheme: dark) {
+  .session-user {
+    color: #b5b5b5;
+  }
+}
+h1 {
+  font-size: 1.5rem;
+  margin: 0.5rem 0;
+}
+h2 {
+  font-size: 1.2rem;
+  margin: 0.5rem 0;
+}
+button {
+  font: inherit;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #0b5fff;
+  border-radius: 6px;
+  background: #0b5fff;
+  color: #ffffff;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+label {
+  display: block;
+  margin: 0.5rem 0 0.25rem;
+}
+select {
+  font: inherit;
+  padding: 0.4rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1a1a1a;
+}
+@media (prefers-color-scheme: dark) {
+  select {
+    background: #1e1e1e;
+    color: #f2f2f2;
+    border-color: #3a3a3a;
+  }
+}
+.repo-meta {
+  color: #555;
+}
+@media (prefers-color-scheme: dark) {
+  .repo-meta {
+    color: #b5b5b5;
+  }
+}
+.preview-banner {
+  border: 1px solid #0b5fff;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin: 0.75rem 0;
+  background: #eef3ff;
+  color: #14306e;
+}
+@media (prefers-color-scheme: dark) {
+  .preview-banner {
+    background: #10203f;
+    color: #cdd8f5;
+    border-color: #3f6fd8;
+  }
+}
+.markdown-preview {
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+@media (prefers-color-scheme: dark) {
+  .markdown-preview {
+    border-color: #3a3a3a;
+  }
+}
+:focus-visible {
+  outline: 2px solid #0b5fff;
+  outline-offset: 2px;
+}
