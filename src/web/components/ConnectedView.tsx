@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import type { ApiClient } from "../api";
 import type { ErrorDetail, Repository } from "../../shared/types";
-import { FIXTURE_REPOSITORIES, FIXTURE_SAMPLE_MARKDOWN } from "../fixtures";
+import { FIXTURE_REPOSITORIES } from "../fixtures";
+import { getPreviewMarkdown } from "../preview-overrides";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { RepositorySelector } from "./RepositorySelector";
 
@@ -160,7 +161,7 @@ export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
                   <li>Visibility: {selected.private ? "private" : "public"}</li>
                 </ul>
                 {preview ? (
-                  <MarkdownPreview markdown={FIXTURE_SAMPLE_MARKDOWN} />
+                  <MarkdownPreview markdown={getPreviewMarkdown()} />
                 ) : (
                   <p>
                     Repository content reading is not implemented yet — a later

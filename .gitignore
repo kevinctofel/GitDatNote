@@ -25,3 +25,7 @@ dist-ssr
 
 .env
 dist-server
+
+# Playwright-generated artifacts
+/test-results/
+/playwright-report/
