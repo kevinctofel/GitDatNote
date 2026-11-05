@@ -79,6 +79,30 @@ export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
     };
   }, [loadRepos]);
 
+  // Reconcile the selected repository against each refreshed list: clear it
+  // if the repository disappeared, or refresh its details if its permissions
+  // or metadata changed.
+  useEffect(() => {
+    if (repos.status !== "ready" || selected === null) return;
+    const fresh = repos.repositories.find(
+      (repository) =>
+        repository.owner === selected.owner &&
+        repository.name === selected.name,
+    );
+    if (fresh === undefined) {
+      setSelected(null);
+      return;
+    }
+    if (
+      fresh.contentRoot !== selected.contentRoot ||
+      fresh.canRead !== selected.canRead ||
+      fresh.canWrite !== selected.canWrite ||
+      fresh.private !== selected.private
+    ) {
+      setSelected(fresh);
+    }
+  }, [repos, selected]);
+
   return (
     <div className="connected">
       {preview && (

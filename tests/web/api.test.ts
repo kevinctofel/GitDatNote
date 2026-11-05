@@ -190,4 +190,37 @@ describe("ApiClient", () => {
     expect(signedOut.state.connected).toBe(false);
     expect(signedOut.error).toBeUndefined();
   });
+
+  // ---- Hardening: connected sessions require a valid user identity ----
+
+  it("requires a valid user identity for a connected session", async () => {
+    // connected: true but no user -> inconsistent -> rejected as an error.
+    const fetch = vi.fn().mockResolvedValue(json(200, { connected: true }));
+    const outcome = await new ApiClient(fetch).getSession();
+    expect(outcome.state.connected).toBe(false);
+    expect(outcome.error?.code).toBe("INTERNAL_ERROR");
+    expect(outcome.error?.retryable).toBe(true);
+  });
+
+  it("rejects a disconnected session that carries a user identity", async () => {
+    // connected: false but a user present -> inconsistent -> rejected.
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(
+        json(200, { connected: false, user: { login: "ghost" } }),
+      );
+    const outcome = await new ApiClient(fetch).getSession();
+    expect(outcome.state.connected).toBe(false);
+    expect(outcome.error?.code).toBe("INTERNAL_ERROR");
+  });
+
+  it("accepts a connected session with a valid user and no CSRF token", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValue(json(200, { connected: true, user: { login: "octocat" } }));
+    const outcome = await new ApiClient(fetch).getSession();
+    expect(outcome.state.connected).toBe(true);
+    expect(outcome.state.user?.login).toBe("octocat");
+    expect(outcome.error).toBeUndefined();
+  });
 });

@@ -9,15 +9,19 @@ import type { ErrorDetail } from "../shared/types";
  */
 export interface SessionUser {
   login: string;
-  name?: string;
+  name?: string | null;
   avatarUrl?: string;
 }
 
-export interface SessionState {
-  connected: boolean;
-  user?: SessionUser;
-  csrfToken?: string;
-}
+/**
+ * A session probe result. A connected session MUST carry a valid user
+ * identity; a disconnected session MUST NOT. Inconsistent combinations
+ * (connected without a user, or disconnected with a user) are invalid and
+ * are rejected at the boundary.
+ */
+export type SessionState =
+  | { connected: true; user: SessionUser; csrfToken?: string }
+  | { connected: false; user?: null };
 
 /** Connection-state machine for the application shell. */
 export type ConnectionState =

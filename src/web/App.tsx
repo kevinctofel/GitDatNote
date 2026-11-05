@@ -52,10 +52,19 @@ export function App({ client: clientProp }: AppProps = {}) {
         }
       })
       .catch(() => {
-        // A failed session probe (e.g. server unreachable) is treated as
-        // "not connected" — never as a live connection.
+        // An unexpected session-probe exception is a generic, retryable
+        // connection error — never silently "disconnected", and never
+        // exposing raw exception details.
         if (generation !== generationRef.current) return;
-        setConnection({ status: "disconnected" });
+        setConnection({
+          status: "error",
+          detail: {
+            code: "GITHUB_UNAVAILABLE",
+            message: "A connection problem occurred. Please try again.",
+            retryable: true,
+            status: 502,
+          },
+        });
       });
   }, [client]);
 

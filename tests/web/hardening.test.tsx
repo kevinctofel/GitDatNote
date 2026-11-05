@@ -1,4 +1,5 @@
 // @vitest-environment happy-dom
+import { act } from "react";
 import { describe, it, expect } from "vitest";
 import { App } from "../../src/web/App";
 import { ConnectedView } from "../../src/web/components/ConnectedView";
@@ -6,6 +7,13 @@ import { ApiError } from "../../src/web/api";
 import type { ApiClient, SessionOutcome } from "../../src/web/api";
 import type { Repository } from "../../src/shared/types";
 import { mount, rerender, flush } from "./test-utils";
+
+// Settle a cascade of React state updates (async loads, effects, re-renders).
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await flush();
+  }
+}
 
 const REPOS: Repository[] = [
   {
@@ -135,6 +143,119 @@ describe("async request safety (hardening)", () => {
 
     // The fast "disconnected" check wins; the disconnected view is shown.
     expect(m.host.textContent).toMatch(/Not connected to GitHub/i);
+    m.unmount();
+  });
+
+  it("falls back to a generic retryable error state when the session probe throws", async () => {
+    const client = {
+      getSession: () => Promise.reject(new Error("boom: internal detail")),
+    } as unknown as ApiClient;
+
+    const m = await mount(<App client={client} />);
+    await settle();
+
+    // A retryable error state (not silently disconnected), with a retry
+    // action, and never the raw exception text.
+    expect(m.host.textContent).toMatch(/Connection problem/i);
+    expect(m.host.textContent).not.toMatch(/Not connected to GitHub/i);
+    expect(m.host.textContent).not.toMatch(/boom: internal detail/);
+    const retry = Array.from(m.host.querySelectorAll("button")).find(
+      (b) => /try again/i.test(b.textContent ?? ""),
+    );
+    expect(retry).toBeDefined();
+    m.unmount();
+  });
+
+  it("clears the selected repository when it disappears on a list refresh", async () => {
+    const repoA = {
+      owner: "acme",
+      name: "notes",
+      contentRoot: "Journal",
+      canRead: true,
+      canWrite: true,
+      private: false,
+    };
+    const repoB = {
+      owner: "acme",
+      name: "other",
+      contentRoot: "Blog",
+      canRead: true,
+      canWrite: false,
+      private: true,
+    };
+    const firstClient = {
+      listRepositories: () => Promise.resolve([repoA]),
+    } as unknown as ApiClient;
+    const secondClient = {
+      listRepositories: () => Promise.resolve([repoB]),
+    } as unknown as ApiClient;
+
+    const m = await mount(<ConnectedView client={firstClient} />);
+    await settle();
+
+    // Select the repository through the accessible <select>.
+    const select = m.host.querySelector("select") as HTMLSelectElement;
+    select.value = "acme/notes";
+    await act(async () => {
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    expect(m.host.textContent).toMatch(/acme\/notes/);
+
+    // Refresh with a list that no longer contains the selected repository.
+    await rerender(m, <ConnectedView client={secondClient} />);
+    await settle();
+
+    // The selected repository is gone; the selection is cleared.
+    expect(m.host.textContent).not.toMatch(/acme\/notes/);
+    expect(m.host.textContent).toMatch(/Select a repository to view its content/i);
+    m.unmount();
+  });
+
+  it("refreshes the selected repository's details when metadata changes on a list refresh", async () => {
+    const repoARead = {
+      owner: "acme",
+      name: "notes",
+      contentRoot: "Journal",
+      canRead: true,
+      canWrite: true,
+      private: false,
+    };
+    const repoAReadOnly = {
+      owner: "acme",
+      name: "notes",
+      contentRoot: "Journal",
+      canRead: true,
+      canWrite: false,
+      private: false,
+    };
+    const firstClient = {
+      listRepositories: () => Promise.resolve([repoARead]),
+    } as unknown as ApiClient;
+    const secondClient = {
+      listRepositories: () => Promise.resolve([repoAReadOnly]),
+    } as unknown as ApiClient;
+
+    const m = await mount(<ConnectedView client={firstClient} />);
+    await settle();
+
+    // Select the repository through the accessible <select>.
+    const select = m.host.querySelector("select") as HTMLSelectElement;
+    select.value = "acme/notes";
+    await act(async () => {
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    // Initially read + write.
+    expect(m.host.textContent).toMatch(/read \+ write/);
+
+    // Refresh with a list where the same repo's permissions changed.
+    await rerender(m, <ConnectedView client={secondClient} />);
+    await settle();
+
+    // The selection is refreshed to the new metadata (read-only now).
+    expect(m.host.textContent).toMatch(/acme\/notes/);
+    expect(m.host.textContent).toMatch(/read-only/);
     m.unmount();
   });
 });

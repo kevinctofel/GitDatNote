@@ -18,11 +18,19 @@ const sessionUserSchema = z.object({
 });
 
 /** `GET /api/session` body. */
-export const sessionStateSchema = z.object({
-  connected: z.boolean(),
-  user: sessionUserSchema.optional(),
-  csrfToken: z.string().optional(),
-});
+// A connected session MUST carry a valid user identity; a disconnected
+// session MUST NOT. Inconsistent combinations are rejected at the boundary.
+export const sessionStateSchema = z.discriminatedUnion("connected", [
+  z.object({
+    connected: z.literal(true),
+    user: sessionUserSchema,
+    csrfToken: z.string().optional(),
+  }),
+  z.object({
+    connected: z.literal(false),
+    user: z.null().optional(),
+  }),
+]);
 
 /** A single repository entry as the frontend consumes it (shared `Repository`). */
 export const repositorySchema = z.object({
