@@ -16,6 +16,17 @@ export function DisconnectedView({ client }: DisconnectedViewProps) {
   const [connecting, setConnecting] = useState(false);
   const [outcome, setOutcome] = useState<ConnectResult | null>(null);
 
+  /**
+   * Start GitHub sign-in.
+   *
+   * NOTE (future single-navigation approach): `connectGithub()` probes
+   * `/api/auth/github/start` with `redirect: "manual"` and, on a real
+   * redirect, this handler re-navigates the browser to the SAME endpoint.
+   * That is a double hit on `/api/auth/github/start`. When real OAuth is
+   * implemented, connect should become a single top-level navigation straight
+   * to `/api/auth/github/start` (the browser follows the provider redirect),
+   * with no prior fetch. Documented only — not implemented in this task.
+   */
   async function handleConnect(): Promise<void> {
     setConnecting(true);
     setOutcome(null);

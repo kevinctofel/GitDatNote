@@ -1,0 +1,65 @@
+import { z } from "zod";
+
+/**
+ * Runtime validation schemas for successful (2xx) JSON responses from the
+ * (placeholder) backend.
+ *
+ * The backend endpoints are not implemented yet, so these schemas guard the
+ * frontend against malformed or partially-implemented responses and turn them
+ * into safe, understandable errors instead of rendering crashes. They mirror
+ * the shared domain shapes in `src/shared/types.ts` (the web `SessionState`,
+ * the shared `Repository`, and the shared `ContentResult`).
+ */
+
+const sessionUserSchema = z.object({
+  login: z.string(),
+  name: z.string().optional(),
+  avatarUrl: z.string().optional(),
+});
+
+/** `GET /api/session` body. */
+export const sessionStateSchema = z.object({
+  connected: z.boolean(),
+  user: sessionUserSchema.optional(),
+  csrfToken: z.string().optional(),
+});
+
+/** A single repository entry as the frontend consumes it (shared `Repository`). */
+export const repositorySchema = z.object({
+  owner: z.string(),
+  name: z.string(),
+  contentRoot: z.string(),
+  canRead: z.boolean(),
+  canWrite: z.boolean(),
+  private: z.boolean(),
+});
+
+/** `GET /api/repositories` body. */
+export const repositoryListSchema = z.array(repositorySchema);
+
+const fileContentSchema = z.object({
+  type: z.literal("file"),
+  path: z.string(),
+  content: z.string(),
+  sha: z.string(),
+  size: z.number(),
+});
+
+const directoryChildSchema = z.object({
+  name: z.string(),
+  type: z.enum(["file", "dir"]),
+  sha: z.string(),
+  size: z.number(),
+});
+
+const directoryListingSchema = z.object({
+  type: z.literal("directory"),
+  path: z.string(),
+  children: z.array(directoryChildSchema),
+});
+
+/** `GET /api/repos/:owner/:repo/content` body (shared `ContentResult`). */
+export const contentResultSchema = z.discriminatedUnion("type", [
+  fileContentSchema,
+  directoryListingSchema,
+]);

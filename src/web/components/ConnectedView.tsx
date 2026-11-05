@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import type { ApiClient } from "../api";
 import type { ErrorDetail, Repository } from "../../shared/types";
@@ -37,12 +37,22 @@ interface ConnectedViewProps {
  * content service is not implemented, so repository content reading is a
  * labeled placeholder; the safe Markdown renderer is demonstrated with
  * sample content in preview mode.
+ *
+ * Repository loading is guarded by a request-generation counter so that stale
+ * responses (out-of-order retries, or a response that lands after the
+ * component unmounts) cannot overwrite the current list state.
  */
 export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
   const [repos, setRepos] = useState<RepoListState>({ status: "loading" });
   const [selected, setSelected] = useState<Repository | null>(null);
 
+  // Request-generation guard: each load increments the generation; a stale
+  // completion (an older load, or a response after unmount) is dropped so
+  // only the latest load wins.
+  const generationRef = useRef(0);
+
   const loadRepos = useCallback(() => {
+    const generation = ++generationRef.current;
     setRepos({ status: "loading" });
     if (preview) {
       // Labeled sample data only — never a live connection.
@@ -51,12 +61,22 @@ export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
     }
     client
       .listRepositories()
-      .then((repositories) => setRepos({ status: "ready", repositories }))
-      .catch((err) => setRepos({ status: "error", detail: toDetail(err) }));
+      .then((repositories) => {
+        if (generation !== generationRef.current) return;
+        setRepos({ status: "ready", repositories });
+      })
+      .catch((err) => {
+        if (generation !== generationRef.current) return;
+        setRepos({ status: "error", detail: toDetail(err) });
+      });
   }, [client, preview]);
 
   useEffect(() => {
     loadRepos();
+    // Invalidate any in-flight load on unmount.
+    return () => {
+      generationRef.current += 1;
+    };
   }, [loadRepos]);
 
   return (

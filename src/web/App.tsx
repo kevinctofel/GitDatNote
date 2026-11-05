@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiClient } from "./api";
 import type { ConnectionState } from "./types";
 import { ConnectedView } from "./components/ConnectedView";
 import { DisconnectedView } from "./components/DisconnectedView";
+
+interface AppProps {
+  /** Injectable API client (defaults to a real client in production). */
+  client?: ApiClient;
+}
 
 /**
  * Minimal, accessible application shell for foundation task 2.5.
@@ -13,19 +18,31 @@ import { DisconnectedView } from "./components/DisconnectedView";
  * disconnected state; a clearly-labeled "Preview the connected layout
  * (sample data)" affordance lets a reviewer see the connected layout without
  * implying a live connection.
+ *
+ * Session loading is guarded by a request-generation counter so that stale
+ * responses (out-of-order retries, or a response that lands after the
+ * component unmounts) cannot overwrite the current connection state.
  */
-export function App() {
-  const client = useMemo(() => new ApiClient(), []);
+export function App({ client: clientProp }: AppProps = {}) {
+  const defaultClient = useMemo(() => new ApiClient(), []);
+  const client = clientProp ?? defaultClient;
   const [connection, setConnection] = useState<ConnectionState>({
     status: "loading",
   });
   const [preview, setPreview] = useState(false);
 
+  // Request-generation guard: each load increments the generation; a stale
+  // completion (an older load, or a response after unmount) is dropped so
+  // only the latest load wins.
+  const generationRef = useRef(0);
+
   const loadConnection = useCallback(() => {
+    const generation = ++generationRef.current;
     setConnection({ status: "loading" });
     client
       .getSession()
       .then((outcome) => {
+        if (generation !== generationRef.current) return;
         if (outcome.state.connected) {
           setConnection({ status: "connected", session: outcome.state });
         } else if (outcome.error) {
@@ -37,12 +54,18 @@ export function App() {
       .catch(() => {
         // A failed session probe (e.g. server unreachable) is treated as
         // "not connected" — never as a live connection.
+        if (generation !== generationRef.current) return;
         setConnection({ status: "disconnected" });
       });
   }, [client]);
 
   useEffect(() => {
     loadConnection();
+    // Invalidate any in-flight load on unmount so a late response cannot
+    // trigger a state update on an unmounted component.
+    return () => {
+      generationRef.current += 1;
+    };
   }, [loadConnection]);
 
   return (

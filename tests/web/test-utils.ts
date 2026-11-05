@@ -1,19 +1,21 @@
 import { act } from "react";
-import { createRoot } from "react-dom/client";
 import type { ReactElement } from "react";
+import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 
-// React 18.3: mark the act environment so act() is permitted without warnings.
-const g = globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean };
-g.IS_REACT_ACT_ENVIRONMENT = true;
+/**
+ * Test utilities for React components under happy-dom.
+ */
 
 export interface Mounted {
   host: HTMLElement;
+  root: Root;
   unmount: () => void;
 }
 
 /**
- * Minimal mount helper (no test-library dependency): renders into a detached
- * host element in the happy-dom document and returns it for DOM assertions.
+ * Mount `element` into a detached host node. `act` is used so effects and state
+ * updates flush before assertions, avoiding "not wrapped in act" warnings.
  */
 export async function mount(element: ReactElement): Promise<Mounted> {
   const host = document.createElement("div");
@@ -24,6 +26,7 @@ export async function mount(element: ReactElement): Promise<Mounted> {
   });
   return {
     host,
+    root,
     unmount: () => {
       root.unmount();
       host.remove();
@@ -32,12 +35,23 @@ export async function mount(element: ReactElement): Promise<Mounted> {
 }
 
 /**
- * Flush pending microtasks/state updates. The extra microtask tick lets an
- * effect-driven `setState` (from an already-resolved promise) settle inside
- * `act()`, so React does not warn about an unwrapped update.
+ * Re-render an already-mounted component with a new element (e.g. to swap in a
+ * new injected client, which changes a load function's identity and re-runs its
+ * data-loading effect). Used to exercise out-of-order request completion.
  */
-export async function flush(): Promise<void> {
+export async function rerender(
+  mounted: Mounted,
+  element: ReactElement,
+): Promise<void> {
   await act(async () => {
-    await Promise.resolve();
+    mounted.root.render(element);
   });
+}
+
+/**
+ * Flush pending microtasks (e.g. an awaited `flush()` in a test's mock client)
+ * so async state updates settle before assertions.
+ */
+export function flush(): Promise<void> {
+  return Promise.resolve();
 }

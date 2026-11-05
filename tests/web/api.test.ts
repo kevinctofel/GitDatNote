@@ -122,4 +122,72 @@ describe("ApiClient", () => {
       expect(result.detail.retryable).toBe(true);
     }
   });
+
+  // ---- Hardening: malformed 2xx responses become a safe error ----
+
+  it("treats an unparseable 2xx session body as a retryable connection error", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response("{ not valid json", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const outcome = await new ApiClient(fetch).getSession();
+    expect(outcome.state.connected).toBe(false);
+    expect(outcome.error?.code).toBe("INTERNAL_ERROR");
+    expect(outcome.error?.retryable).toBe(true);
+    expect(outcome.error?.status).toBe(500);
+  });
+
+  it("treats a wrong-shape 2xx session body as a retryable connection error", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(200, { connected: "yes" }));
+    const outcome = await new ApiClient(fetch).getSession();
+    expect(outcome.state.connected).toBe(false);
+    expect(outcome.error?.code).toBe("INTERNAL_ERROR");
+    expect(outcome.error?.retryable).toBe(true);
+  });
+
+  it("rejects a malformed 2xx repository-list body with a safe error", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(200, { notAnArray: true }));
+    const client = new ApiClient(fetch);
+    await expect(client.listRepositories()).rejects.toMatchObject({
+      detail: { code: "INTERNAL_ERROR", retryable: true, status: 500 },
+    });
+  });
+
+  it("rejects a malformed 2xx content body with a safe error", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(200, { type: "file" }));
+    const client = new ApiClient(fetch);
+    await expect(
+      client.readContent("octocat", "hello", "README.md"),
+    ).rejects.toMatchObject({
+      detail: { code: "INTERNAL_ERROR", retryable: true, status: 500 },
+    });
+  });
+
+  it("distinguishes a transport failure on the session probe from a signed-out 401", async () => {
+    // Transport failure (no response) → retryable connection error.
+    const failingFetch = vi.fn().mockRejectedValue(new TypeError("network down"));
+    const failing = await new ApiClient(failingFetch).getSession();
+    expect(failing.state.connected).toBe(false);
+    expect(failing.error?.code).toBe("GITHUB_UNAVAILABLE");
+    expect(failing.error?.retryable).toBe(true);
+
+    // Signed-out 401 → plain "not connected", no error detail.
+    const authFetch = vi
+      .fn()
+      .mockResolvedValue(
+        json(401, {
+          error: {
+            code: "UNAUTHORIZED",
+            message: "Unauthorized",
+            retryable: false,
+            status: 401,
+          },
+        }),
+      );
+    const signedOut = await new ApiClient(authFetch).getSession();
+    expect(signedOut.state.connected).toBe(false);
+    expect(signedOut.error).toBeUndefined();
+  });
 });

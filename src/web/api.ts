@@ -9,6 +9,11 @@ import type {
   Repository,
 } from "../shared/types";
 import type { ConnectResult, SessionState } from "./types";
+import {
+  contentResultSchema,
+  repositoryListSchema,
+  sessionStateSchema,
+} from "./api-schemas";
 
 /** A client-facing error that carries the shared error contract. */
 export class ApiError extends Error {
@@ -22,11 +27,33 @@ export class ApiError extends Error {
 export interface SessionOutcome {
   state: SessionState;
   /** Present when the session check failed for a reason other than
-   * "simply not connected" (e.g. server error / unreachable). */
+   * "simply not connected" (e.g. server error / unreachable / malformed). */
   error?: ErrorDetail;
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * A minimal runtime validator: validates parsed JSON and reports success.
+ * Structurally satisfied by a Zod schema (`safeParse(data) -> { success }`).
+ * Kept structural (not a Zod generic) so the client does not depend on a
+ * specific Zod version's type surface.
+ */
+type Validator = {
+  safeParse(data: unknown): { success: boolean };
+};
+
+/**
+ * A safe, understandable error for a 2xx response whose body is not the
+ * expected JSON shape (unparseable JSON, or valid JSON of the wrong shape).
+ * Reuses the existing `INTERNAL_ERROR` contract — no new shared type is added.
+ */
+const MALFORMED_RESPONSE: ErrorDetail = {
+  code: "INTERNAL_ERROR",
+  message: "The server returned an unexpected response. Please try again.",
+  retryable: true,
+  status: 500,
+};
 
 /**
  * Thin, typed API client. It talks to the (not-yet-implemented) backend
@@ -34,7 +61,10 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
  * can distinguish retryable from non-retryable failures.
  *
  * It never fakes success: a 404 (endpoint absent) or 401 (no session) on the
- * session probe reports "not connected", not a live connection.
+ * session probe reports "not connected", not a live connection. Successful
+ * (2xx) JSON bodies are validated at runtime against the shared domain
+ * shapes so a malformed body becomes a safe, understandable error instead of
+ * a rendering crash.
  */
 export class ApiClient {
   private readonly fetchImpl: FetchLike;
@@ -47,7 +77,10 @@ export class ApiClient {
 
   async getSession(): Promise<SessionOutcome> {
     try {
-      const state = await this.request<SessionState>("/api/session");
+      const state = await this.request<SessionState>(
+        "/api/session",
+        sessionStateSchema,
+      );
       return { state };
     } catch (err) {
       if (err instanceof ApiError) {
@@ -61,7 +94,7 @@ export class ApiClient {
   }
 
   async listRepositories(): Promise<Repository[]> {
-    return this.request<Repository[]>("/api/repositories");
+    return this.request<Repository[]>("/api/repositories", repositoryListSchema);
   }
 
   async readContent(
@@ -72,6 +105,7 @@ export class ApiClient {
     const query = new URLSearchParams({ path }).toString();
     return this.request<ContentResult>(
       `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/content?${query}`,
+      contentResultSchema,
     );
   }
 
@@ -80,6 +114,14 @@ export class ApiClient {
    * `/api/auth/github/start` endpoint. A real redirect means the browser
    * should follow it; a 404 means the backend is not implemented yet and the
    * UI should show a labeled "not available" placeholder.
+   *
+   * NOTE (future single-navigation approach): this method probes the endpoint
+   * with `redirect: "manual"`, and on a real redirect the caller re-navigates
+   * the browser to the SAME endpoint (see `DisconnectedView.handleConnect`).
+   * That is a double hit on `/api/auth/github/start`. When real OAuth is
+   * implemented, connect should become a single top-level navigation straight
+   * to `/api/auth/github/start` (the browser follows the provider redirect),
+   * with no prior fetch. Documented only — not implemented in this task.
    */
   async connectGithub(): Promise<ConnectResult> {
     try {
@@ -96,17 +138,44 @@ export class ApiClient {
     }
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(
+    path: string,
+    schema?: Validator,
+    init?: RequestInit,
+  ): Promise<T> {
     let res: Response;
     try {
       res = await this.fetchImpl(path, init);
     } catch {
+      // Transport failure (no response at all) — a retryable connection error,
+      // distinct from an expected signed-out 401/404.
       throw new ApiError(mapGithubNetworkError());
     }
     if (res.ok) {
-      return (await res.json()) as T;
+      const data = await this.parseJson(res);
+      if (schema) {
+        const parsed = schema.safeParse(data);
+        if (!parsed.success) {
+          // A valid HTTP 200 with a malformed / wrong-shape body: a safe,
+          // understandable error instead of a rendering crash.
+          throw new ApiError(MALFORMED_RESPONSE);
+        }
+      }
+      return data as T;
     }
     throw new ApiError(await errorDetailFromResponse(res));
+  }
+
+  /**
+   * Parse a 2xx JSON body. A body that is not valid JSON becomes a safe
+   * `MALFORMED_RESPONSE` error rather than propagating a raw `SyntaxError`.
+   */
+  private async parseJson(res: Response): Promise<unknown> {
+    try {
+      return (await res.json()) as unknown;
+    } catch {
+      throw new ApiError(MALFORMED_RESPONSE);
+    }
   }
 }
 
