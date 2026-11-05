@@ -1,0 +1,84 @@
+# GitHub Actions CI for GitDatNote 2.0 (foundation task 2.8).
+#
+# Runs the complete verification suite independently on a Node.js matrix of
+# 24 (LTS, the documented minimum) and 26. Each matrix leg is an isolated job:
+# clean lockfile install, lint, typecheck (web + server), unit/mocked tests,
+# web + server builds, and Playwright browser E2E against the app's own Vite
+# dev server. Browser tests are deterministic and isolated from external
+# GitHub services.
+#
+# Security: read-only `contents` permission, no secrets, no credentials, no
+# writes to the live SecondBrain repository. Playwright failure artifacts are
+# uploaded only when a leg fails, with a short retention window.
+name: CI
+
+on:
+  push:
+    branches:
+      - feat/gitdatnote-2
+  pull_request:
+    branches:
+      - main
+      - feat/gitdatnote-2
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      # Let every matrix leg run to completion so both Node versions are
+      # verified independently, even if one fails.
+      fail-fast: false
+      matrix:
+        node-version: ["24", "26"]
+    env:
+      # CI=true so Playwright's webServer never reuses an unrelated server
+      # (playwright.config.ts: reuseExistingServer = !process.env.CI).
+      CI: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies (reproducible lockfile install)
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck (web + server)
+        run: npm run typecheck
+
+      - name: Unit and mocked tests (Vitest)
+        run: npm run test
+
+      - name: Build web (Vite)
+        run: npm run build
+
+      - name: Build server (tsc)
+        run: npm run build:server
+
+      - name: Install Playwright Chromium and Linux dependencies
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser E2E tests (Playwright)
+        run: npm run test:e2e
+
+      - name: Upload Playwright failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts-node-${{ matrix.node-version }}
+          path: |
+            test-results
+            playwright-report
+          retention-days: 7
+          if-no-files-found: ignore
