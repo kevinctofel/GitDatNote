@@ -610,3 +610,60 @@ Comprehensive unit tests for the five shared modules (`ed0516c` + review correct
 **Verification (2026-11-02, post-pass):** `npm run lint` 0; `npm run typecheck` 0; `npm run test` **289/289** (287 baseline + 2 new), 8 test files; `npm run build` 0; `npm run build:server` 0; `openspec validate modernize-gitdatnote-foundation` valid (2 pre-existing non-blocking length warnings); `git diff --check` clean. Compiled-server smoke test (port 3997): `GET /api/health` → 200 `{"status":"ok"}`; raw malformed target → 422 with request log line `{"path":"(unparseable)","status":422}` (no raw target in logs); health after → 200; SIGTERM → clean `shutdown` log, exit 0. Invalid-PORT smoke: `PORT=3999abc` → `{"event":"invalid_port"}` error log, exit 1. No server process left running.
 
 **Out of scope (unchanged):** GitHub authentication, database sessions, content APIs, frontend migration, dependency-security upgrades (task 2.10), Node 24 runtime gate (task 2.8). The uncommitted `.hermes/skills/openspec-apply-change/SKILL.md` modification was left untouched.
+
+## Dependency-Security Review — Task 2.10 (2026-11-05)
+
+**Branch/HEAD:** `feat/gitdatnote-2` @ `59977dd`. Local Node 26.7.0 / npm 11.17.0. `npm audit fix --force` never used; no `npm update` broad refreshes; no source-code, CI, or test changes — manifest and lockfile only.
+
+### Baseline (before)
+
+`npm audit` (full tree, post-`npm ci`): **30 findings** — 1 low / 15 moderate / 11 high / 3 critical. This confirms the task-2.8 `npm ci` report (30) rather than the older task-2.1 figure (25); the task-2.1 count predates the dev-tooling major versions installed in task 2.2.
+
+Production-reachable subset (`npm audit --omit=dev`, before): **6 findings** — 5 moderate in the `octokit` tree (`octokit` → `@octokit/plugin-paginate-rest` ReDoS ×2, `@octokit/endpoint` ReDoS, `@octokit/request` ReDoS, `@octokit/request-error` ReDoS) and 1 high in `@octokit/app` → `jsonwebtoken` → `jws@3.2.2` (improperly verifies HMAC signature). The other 24 findings were development-tooling exposure (vite/vitest/happy-dom/tinypool/esbuild trees and ESLint/TS-eslint transitive DoS/ReDoS). The 3 criticals were dev-only: `tinypool` prototype-pollution→RCE (×2, via vitest) and `happy-dom` VM context escape→RCE.
+
+Full advisory inventory (30 affected roots → 102 advisory entries) is preserved in `~/.hermes/cache/scratch/audit-before.json` (local artifact); the per-advisory breakdown is summarized in the resolution table below.
+
+### Resolution by group (each group verified green before the next began)
+
+| Group | Change | Findings resolved | Gate result |
+|---|---|---|---|
+| 1 (prod) | `octokit ^3.2.1 → ^3.2.2`; `jws 3.2.2 → 3.2.3` (via `@octokit/app`); in-range bumps of the 5 patched `@octokit/*` sub-packages | 6 (5 moderate, 1 high) | prod audit 6 → **0**; lint/typecheck/test (299/299)/build/build:server/e2e (10/10) all green |
+| 2 | `js-yaml ^4.1.0 → ^4.3.2` | 5 (3 high, 2 moderate) — merge-key quadratic DoS, `!!omap` DoS, `maxTotalMergeKeys` gap | full group gate green |
+| 3 | `vite ^4.5.5 → ^6.4.5`; `vitest ^2.1.9 → ^4.1.12`; `@vitejs/plugin-react ^4.3.4 → ^5.2.0`; in-range bumps (`rollup 4.62`, `esbuild 0.28.7`, `postcss 8.5.9`, `nanoid 3.3.18`, `source-map-js 1.2.2`, `@babel/core 7.29.13`) | 13 — `vite` (19 advisories, 2 high launch-editor + rest moderate/low dev-server), `vitest` (1 critical UI file-read + cascades), `tinypool` (2 critical, removed from tree in v4), `@vitest/mocker` (2 moderate), `vite-node`, `esbuild`, `rollup`, `postcss`, `nanoid`, `source-map-js`, `@babel/core` (1 low), `@babel/helpers` (1 moderate), `browserslist` (2 high — resolved automatically when `@babel/core` re-resolved to 7.29.13, which requires `browserslist ^4.29.5`) | full group gate green; no source/config changes needed (all `vitest.config.ts` / `vite.config.ts` / `tsconfig.*` options remain valid in the new majors; `happy-dom` env still resolved under vitest 4) |
+| 4 | `happy-dom ^15.11.7 → ^21.0.4` | 5 (1 critical VM escape, 3 high, 1 moderate) | full group gate green; no test code changes required |
+| 5 | `ajv 6.12.6 → 6.15.0` (owned by `eslint-plugin-jsx-a11y`); `flatted 3.3.2 → 3.4.4` (owned by `eslint`'s `flat-cache`); `minimatch 3.1.2 → 3.1.5` (owned by `eslint`/glob tree); `brace-expansion 1.1.11 → 1.1.21` (owned by `minimatch@3.1.5`, `^1.1.7`); scoped override `@typescript-eslint/typescript-estree → minimatch 11.0.5` | 9 — `ajv` (1 moderate ReDoS `$data`), `flatted` (2 high: unbounded-recursion DoS, prototype pollution), `minimatch` (3 high ReDoS + 1 moderate globparts), `brace-expansion` (8 advisories, top high), `typescript-estree` cascade (1 moderate, surfaces under 5 `@typescript-eslint/*` roots) | full group gate green — including `lint` with the TS parser running the overridden `minimatch` |
+
+Every one of the 30 baseline findings is resolved. No advisory was left unresolved; there are no exceptions to record.
+
+### Single npm override (documented, per spec)
+
+```json
+"overrides": {
+  "@typescript-eslint/typescript-estree": { "minimatch": "11.0.5" }
+}
+```
+
+Justification: `typescript-estree@8.72.1` (latest; part of the installed `@typescript-eslint` 8.72.1 tree) pins `minimatch ^10.2.2`, whose highest release (10.2.6) still carries the globparts DoS advisory (`<11.0.1`); no non-breaking fix exists within that tree. `minimatch@11.0.5` is API-compatible for the glob usage (verified: full lint run with `@typescript-eslint/parser` + `eslint-plugin` green, full suite green). `minimatch@11.0.5` engines: `20 || >=22` — Node 24/26 compatible. No other overrides were added.
+
+### Node 24 / Node 26 compatibility
+
+Engines of every changed direct dependency: `vite@6.4.5` `^18 || ^20 || >=22`; `vitest@4.1.12` `^20 || ^22 || >=24`; `@vitejs/plugin-react@5.2.0` `^20.19 || >=22.12`; `happy-dom@21.0.4` `>=20`; `minimatch@11.0.5` `20 || >=22`; all others within their existing majors. Local verification ran on Node 26.7.0; the Node 24 leg will be confirmed by hosted CI (Node 24 + 26 matrix, task 2.8 workflow) once these changes are pushed — per spec, Node 24 compatibility is not claimed from local Node 26 runs alone.
+
+### Final audit (after)
+
+- `npm audit`: **0 vulnerabilities** (info 0 / low 0 / moderate 0 / high 0 / critical 0), exit code 0.
+- `npm audit --json`: severities `{info:0, low:0, moderate:0, high:0, critical:0, total:0}` (artifact: `~/.hermes/cache/scratch/audit-after.json`).
+- `npm audit --omit=dev`: **0 vulnerabilities**, exit code 0.
+
+### Complete verification suite (after final changes, from clean `npm ci`)
+
+`npm ci` clean; `npm run lint` 0; `npm run typecheck` 0; `npm run test` **299/299** (15 files) — no assertions weakened, no tests removed, real-browser Markdown XSS regression tests still exercise the actual `src/web/markdown.ts` pipeline; `npm run build` 0 (134 modules); `npm run build:server` 0; `npm run test:e2e` **10/10** in Chromium; `openspec validate modernize-gitdatnote-foundation` valid (2 pre-existing non-blocking length warnings); `git diff --check` clean; `npm ls --depth=0` — all direct deps at the versions above, no invalid/missing.
+
+### Files changed
+
+- `package.json` — `dependencies`: `octokit ^3.2.2`; `devDependencies`: `@vitejs/plugin-react ^5.2.0`, `happy-dom ^21.0.4`, `js-yaml ^4.3.2`, `vite ^6.4.5`, `vitest ^4.1.12`; new top-level `overrides` (single entry, above).
+- `package-lock.json` — lockfile updated through npm (`npm update` per group + the override); no manual lockfile edits.
+
+### Out of scope (unchanged)
+
+No source, test, CI, or OpenSpec content changes. No commit, push, or archive performed. Unrelated local changes (`.hermes/skills/*` modifications, untracked Hermes scripts) preserved untouched. No GitHub credentials, repository identifiers, personal names, or emails introduced; encryption keys remain outside SQLite and source control.
