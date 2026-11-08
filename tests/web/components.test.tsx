@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 import { act } from "react";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mount, flush } from "./test-utils";
 import { ConnectedView } from "../../src/web/components/ConnectedView";
 import { DisconnectedView } from "../../src/web/components/DisconnectedView";
+import { ErrorView } from "../../src/web/components/ErrorView";
 import { ApiError } from "../../src/web/api";
 import type { ApiClient } from "../../src/web/api";
 import type { Repository } from "../../src/shared/types";
@@ -85,9 +86,7 @@ describe("ConnectedView", () => {
 
 describe("DisconnectedView", () => {
   it("offers a labeled Connect GitHub action", async () => {
-    const client = {
-      connectGithub: () => Promise.resolve({ kind: "unavailable" as const }),
-    } as unknown as ApiClient;
+    const client = { connectGithub: () => {} } as unknown as ApiClient;
     const { host, unmount } = await mount(<DisconnectedView client={client} />);
     const connect = Array.from(host.querySelectorAll("button")).find((b) =>
       /connect github/i.test(b.textContent ?? ""),
@@ -96,10 +95,9 @@ describe("DisconnectedView", () => {
     unmount();
   });
 
-  it("shows a labeled 'not available yet' placeholder after a 404 attempt", async () => {
-    const client = {
-      connectGithub: () => Promise.resolve({ kind: "unavailable" as const }),
-    } as unknown as ApiClient;
+  it("clicking Connect GitHub invokes connectGithub() exactly once", async () => {
+    const connectGithub = vi.fn();
+    const client = { connectGithub } as unknown as ApiClient;
     const { host, unmount } = await mount(<DisconnectedView client={client} />);
     const connect = Array.from(host.querySelectorAll("button")).find((b) =>
       /connect github/i.test(b.textContent ?? ""),
@@ -108,8 +106,41 @@ describe("DisconnectedView", () => {
       connect.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
-    expect(host.textContent ?? "").toMatch(/not available yet/i);
-    expect(host.textContent ?? "").toMatch(/labeled placeholder|no live connection/i);
+    expect(connectGithub).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+});
+
+describe("ErrorView", () => {
+  it("renders fixed copy for a known reason", async () => {
+    const { host, unmount } = await mount(
+      <ErrorView search="?reason=auth_unconfigured" />,
+    );
+    expect(host.textContent ?? "").toMatch(
+      /not configured for this GitDatNote instance/i,
+    );
+    unmount();
+  });
+
+  it("renders fixed copy for an expired sign-in attempt", async () => {
+    const { host, unmount } = await mount(<ErrorView search="?reason=state_expired" />);
+    expect(host.textContent ?? "").toMatch(/expired before it completed/i);
+    unmount();
+  });
+
+  it("never renders raw query values for unknown reasons", async () => {
+    const { host, unmount } = await mount(
+      <ErrorView search="?reason=evil-script-injection" />,
+    );
+    const text = host.textContent ?? "";
+    expect(text).toMatch(/Something went wrong/i);
+    expect(text).not.toContain("evil-script-injection");
+    unmount();
+  });
+
+  it("falls back to a generic message when no reason is present", async () => {
+    const { host, unmount } = await mount(<ErrorView search="" />);
+    expect(host.textContent ?? "").toMatch(/Something went wrong/i);
     unmount();
   });
 });

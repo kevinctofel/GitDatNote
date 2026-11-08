@@ -3,6 +3,7 @@ import { ApiClient } from "./api";
 import type { ConnectionState } from "./types";
 import { ConnectedView } from "./components/ConnectedView";
 import { DisconnectedView } from "./components/DisconnectedView";
+import { ErrorView } from "./components/ErrorView";
 
 interface AppProps {
   /** Injectable API client (defaults to a real client in production). */
@@ -76,6 +77,23 @@ export function App({ client: clientProp }: AppProps = {}) {
       generationRef.current += 1;
     };
   }, [loadConnection]);
+
+  // Backend auth failures redirect the browser to
+  // `/error?reason=<safe-code>`; render that path with fixed, safe copy
+  // (never raw query values).
+  const [location] = useState(() => window.location);
+  if (location.pathname === "/error") {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <span className="app-title">GitDatNote</span>
+        </header>
+        <main>
+          <ErrorView search={location.search} />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

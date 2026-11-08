@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { describe, it, expect, vi } from "vitest";
 import { ApiClient, ApiError } from "../../src/web/api";
 
@@ -96,31 +97,15 @@ describe("ApiClient", () => {
     });
   });
 
-  it("connectGithub: 404 → labeled unavailable placeholder", async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValue(json(404, { error: { code: "FILE_NOT_FOUND", message: "nope", retryable: false, status: 404 } }));
+  it("connectGithub: exactly one top-level navigation, no fetch probe", () => {
+    const fetch = vi.fn();
     const client = new ApiClient(fetch);
-    const result = await client.connectGithub();
-    expect(result).toEqual({ kind: "unavailable" });
-  });
-
-  it("connectGithub: 302 → redirect", async () => {
-    const fetch = vi.fn().mockResolvedValue(json(302, {}));
-    const client = new ApiClient(fetch);
-    const result = await client.connectGithub();
-    expect(result).toEqual({ kind: "redirect" });
-  });
-
-  it("connectGithub: network failure → retryable error", async () => {
-    const fetch = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
-    const client = new ApiClient(fetch);
-    const result = await client.connectGithub();
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.detail.code).toBe("GITHUB_UNAVAILABLE");
-      expect(result.detail.retryable).toBe(true);
-    }
+    const assign = vi.spyOn(window.location, "assign");
+    client.connectGithub();
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(assign).toHaveBeenCalledWith("/api/auth/github/start");
+    expect(fetch).not.toHaveBeenCalled();
+    assign.mockRestore();
   });
 
   // ---- Hardening: malformed 2xx responses become a safe error ----

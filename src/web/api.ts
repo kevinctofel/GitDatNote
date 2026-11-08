@@ -8,7 +8,7 @@ import type {
   ErrorResponse,
   Repository,
 } from "../shared/types";
-import type { ConnectResult, SessionState } from "./types";
+import type { SessionState } from "./types";
 import {
   contentResultSchema,
   repositoryListSchema,
@@ -110,32 +110,14 @@ export class ApiClient {
   }
 
   /**
-   * Attempt to start GitHub sign-in by reaching the (not-yet-implemented)
-   * `/api/auth/github/start` endpoint. A real redirect means the browser
-   * should follow it; a 404 means the backend is not implemented yet and the
-   * UI should show a labeled "not available" placeholder.
-   *
-   * NOTE (future single-navigation approach): this method probes the endpoint
-   * with `redirect: "manual"`, and on a real redirect the caller re-navigates
-   * the browser to the SAME endpoint (see `DisconnectedView.handleConnect`).
-   * That is a double hit on `/api/auth/github/start`. When real OAuth is
-   * implemented, connect should become a single top-level navigation straight
-   * to `/api/auth/github/start` (the browser follows the provider redirect),
-   * with no prior fetch. Documented only — not implemented in this task.
+   * Start GitHub sign-in with exactly one top-level navigation to
+   * `/api/auth/github/start` — no fetch probe. The server owns every failure
+   * mode: it answers with a safe, labeled error page or redirects the
+   * browser to `/error?reason=<safe-code>`, which the app renders with
+   * fixed, safe copy (see `ErrorView`).
    */
-  async connectGithub(): Promise<ConnectResult> {
-    try {
-      const res = await this.fetchImpl("/api/auth/github/start", {
-        redirect: "manual",
-      });
-      const isRedirect =
-        res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400);
-      if (isRedirect) return { kind: "redirect" };
-      if (res.status === 404) return { kind: "unavailable" };
-      return { kind: "error", detail: await errorDetailFromResponse(res) };
-    } catch {
-      return { kind: "error", detail: mapGithubNetworkError() };
-    }
+  connectGithub(): void {
+    window.location.assign("/api/auth/github/start");
   }
 
   private async request<T>(

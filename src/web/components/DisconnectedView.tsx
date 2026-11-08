@@ -1,6 +1,4 @@
-import { useState } from "react";
 import type { ApiClient } from "../api";
-import type { ConnectResult } from "../types";
 
 interface DisconnectedViewProps {
   client: ApiClient;
@@ -8,37 +6,17 @@ interface DisconnectedViewProps {
 
 /**
  * GitHub-not-connected state. Offers the clearly-labeled "Connect GitHub"
- * action. Because the auth backend is not implemented yet, a failed attempt
- * shows an explicit "not available yet" placeholder — never a fake
- * connection.
+ * action.
+ *
+ * A click performs exactly ONE top-level navigation to
+ * `/api/auth/github/start` — no fetch probe. Every failure mode is owned by
+ * the server, which answers with a safe, labeled error page or redirects
+ * the browser to `/error?reason=<safe-code>`; the app renders that path
+ * with fixed, safe copy (see `ErrorView`), never raw query values.
  */
 export function DisconnectedView({ client }: DisconnectedViewProps) {
-  const [connecting, setConnecting] = useState(false);
-  const [outcome, setOutcome] = useState<ConnectResult | null>(null);
-
-  /**
-   * Start GitHub sign-in.
-   *
-   * NOTE (future single-navigation approach): `connectGithub()` probes
-   * `/api/auth/github/start` with `redirect: "manual"` and, on a real
-   * redirect, this handler re-navigates the browser to the SAME endpoint.
-   * That is a double hit on `/api/auth/github/start`. When real OAuth is
-   * implemented, connect should become a single top-level navigation straight
-   * to `/api/auth/github/start` (the browser follows the provider redirect),
-   * with no prior fetch. Documented only — not implemented in this task.
-   */
-  async function handleConnect(): Promise<void> {
-    setConnecting(true);
-    setOutcome(null);
-    const result = await client.connectGithub();
-    if (result.kind === "redirect") {
-      // The backend issued a real sign-in redirect — let the browser follow
-      // it (this is the future OAuth flow; it does not exist yet).
-      window.location.assign("/api/auth/github/start");
-      return;
-    }
-    setOutcome(result);
-    setConnecting(false);
+  function handleConnect(): void {
+    client.connectGithub();
   }
 
   return (
@@ -48,23 +26,9 @@ export function DisconnectedView({ client }: DisconnectedViewProps) {
         GitDatNote reads and writes your notes through GitHub. You are not
         signed in.
       </p>
-      <button type="button" onClick={handleConnect} disabled={connecting}>
-        {connecting ? "Connecting…" : "Connect GitHub"}
+      <button type="button" onClick={handleConnect}>
+        Connect GitHub
       </button>
-
-      {outcome?.kind === "unavailable" && (
-        <p role="status">
-          <strong>GitHub sign-in is not available yet.</strong> The connection
-          backend has not been implemented in this build. This is a labeled
-          placeholder — no live connection was made.
-        </p>
-      )}
-      {outcome?.kind === "error" && (
-        <p role="alert">
-          {outcome.detail.message}
-          {outcome.detail.retryable ? " You can retry." : ""}
-        </p>
-      )}
     </section>
   );
 }

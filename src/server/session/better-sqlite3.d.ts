@@ -22,6 +22,8 @@ declare module 'better-sqlite3' {
     constructor(filename: string, options?: Record<string, unknown>);
     exec(sql: string): this;
     prepare(sql: string): Database.Statement;
+    /** Set a SQLite pragma (e.g. `journal_mode = WAL`). */
+    pragma(source: string): unknown;
     /** Wrap a function in a transaction (all-or-nothing execution). */
     transaction<T>(fn: T): T;
     close(): this;

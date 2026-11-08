@@ -29,14 +29,3 @@ export type ConnectionState =
   | { status: "disconnected" }
   | { status: "connected"; session: SessionState }
   | { status: "error"; detail: ErrorDetail };
-
-/**
- * Result of attempting to reach the (not-yet-implemented) GitHub auth
- * endpoint. `unavailable` is a local, clearly-labeled placeholder state —
- * it is NOT a backend error-contract entry and is never presented as a
- * successful connection.
- */
-export type ConnectResult =
-  | { kind: "redirect" }
-  | { kind: "unavailable" }
-  | { kind: "error"; detail: ErrorDetail };

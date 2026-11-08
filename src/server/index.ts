@@ -17,6 +17,18 @@
  *   `/api/articles/{id}`) rather than raw path segments.
  * - Standard API error handling via the shared contracts in `src/shared`.
  *
+ * Authentication routes (task 3.2), all server-side:
+ * - `GET /api/auth/github/start` -> 302 to GitHub's App authorization URL.
+ * - `GET /api/auth/github/callback` -> validates state/browser binding,
+ *   exchanges the code, creates an encrypted session, 302 to `/`.
+ * - `GET /api/session` -> `{ connected: false }` or `{ connected: true,
+ *   user: { login, name, avatarUrl }, csrfToken }`.
+ * - `POST /api/auth/logout` -> CSRF-protected session deletion (204).
+ * - `GET /api/repositories` -> authenticated repository discovery boundary.
+ * Missing GitHub App credentials make these routes fail safely (redirect to
+ * `/error?reason=auth_unconfigured` or 401) without affecting health,
+ * logging, or frontend serving.
+ *
  * Configuration (environment variables):
  * - `PORT`     — listen port (default: 3000, matching the Vite `/api` proxy).
  *   If `PORT` is set to a value that is not a base-10 integer in 1–65535
@@ -34,6 +46,25 @@ import { createLogger, logRequest, resolveLogLevel } from './middleware/logging.
 import type { LogLevel } from './middleware/logging.js';
 import { sendApiNotFound, sendJsonError, sendUnexpectedError } from './middleware/errorHandling.js';
 import { errorDetail } from '../shared/errors.js';
+import {
+  handleAuthCallback,
+  handleAuthStart,
+  handleLogout,
+  handleRepositories,
+  handleSession,
+  resolveAuthConfig,
+  type AuthRouteDeps,
+} from './auth/index.js';
+import type { PendingStateStore } from './auth/index.js';
+import { openPendingStateStore } from './auth/state.js';
+import {
+  openSessionStorage,
+  resolveSessionConfig,
+  resolveCookieSecure,
+  SessionStorageError,
+  type SessionConfig,
+  type SessionStorage,
+} from './session/index.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = '127.0.0.1';
@@ -50,6 +81,12 @@ const UNPARSEABLE_PATH = '(unparseable)';
 export interface AppOptions {
   /** Log level; defaults to the `LOG_LEVEL` environment variable (`info`). */
   readonly logLevel?: LogLevel;
+  /** Environment map (defaults to `process.env`); tests inject fakes. */
+  readonly env?: Record<string, string | undefined>;
+  /** Injectable fetch for GitHub calls (tests mock all upstream traffic). */
+  readonly fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** Injectable clock (epoch milliseconds) for deterministic tests. */
+  readonly now?: () => number;
 }
 
 /**
@@ -59,6 +96,42 @@ export interface AppOptions {
  */
 export function createApp(options: AppOptions = {}): Server {
   const logger = createLogger(options.logLevel ?? resolveLogLevel());
+  const env = options.env ?? process.env;
+  const now = options.now ?? Date.now;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const cookieSecure = resolveCookieSecure(env);
+
+  // Task 3.1 session storage and task 3.2 pending-authorization state both
+  // live in the same SQLite file but in separate tables with separate
+  // lifetimes. A broken session database degrades auth safely: the auth
+  // endpoints report 401 / a safe error, while health, logging, and
+  // frontend serving keep working.
+  let session: { storage: SessionStorage; config: SessionConfig } | null = null;
+  let stateStore: PendingStateStore | null = null;
+  try {
+    const config = resolveSessionConfig(env, now);
+    session = { storage: openSessionStorage(config), config };
+    stateStore = openPendingStateStore(config.dbPath, logger, now);
+  } catch (err) {
+    const code = err instanceof SessionStorageError ? err.code : 'DB_ERROR';
+    logger.warn({ event: 'session_storage_unavailable', code });
+  }
+
+  const authResult = resolveAuthConfig(env);
+  const authConfig = authResult.status === 'ok' ? authResult.config : null;
+  if (authResult.status === 'unconfigured') {
+    logger.warn({ event: 'auth_not_configured', reason: authResult.reason });
+  }
+
+  const authDeps: AuthRouteDeps = {
+    logger,
+    now,
+    fetchImpl,
+    authConfig,
+    stateStore,
+    session,
+    cookieSecure,
+  };
 
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const startedAt = process.hrtime.bigint();
@@ -98,6 +171,32 @@ export function createApp(options: AppOptions = {}): Server {
         res.end(JSON.stringify({ status: 'ok' }));
         return;
       }
+      if (pathname === '/api/auth/github/start' && req.method === 'GET') {
+        handleAuthStart(req, res, authDeps);
+        return;
+      }
+      if (pathname === '/api/auth/github/callback' && req.method === 'GET') {
+        // The callback query string contains the authorization code, so it
+        // must never be logged; the request logger records pathname only.
+        void handleAuthCallback(req, res, authDeps).catch((err: unknown) => {
+          sendUnexpectedError(res, logger, err);
+        });
+        return;
+      }
+      if (pathname === '/api/session' && req.method === 'GET') {
+        handleSession(req, res, authDeps);
+        return;
+      }
+      if (pathname === '/api/auth/logout' && req.method === 'POST') {
+        handleLogout(req, res, authDeps);
+        return;
+      }
+      if (pathname === '/api/repositories' && req.method === 'GET') {
+        void handleRepositories(req, res, authDeps).catch((err: unknown) => {
+          sendUnexpectedError(res, logger, err);
+        });
+        return;
+      }
       if (pathname.startsWith('/api/')) {
         sendApiNotFound(res);
         return;
@@ -109,7 +208,12 @@ export function createApp(options: AppOptions = {}): Server {
     }
   };
 
-  return http.createServer(handler);
+  const server = http.createServer(handler);
+  server.on('close', () => {
+    stateStore?.close();
+    session?.storage.close();
+  });
+  return server;
 }
 
 /**

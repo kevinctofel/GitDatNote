@@ -6,6 +6,12 @@
  * `repository-content` specification.
  */
 
+/**
+ * Default repository content root (design.md A-05). Task 3.2 uses this
+ * fixed value; later tasks make it per-repository configurable.
+ */
+export const DEFAULT_CONTENT_ROOT = 'src/posts';
+
 /** A repository the connected user can operate on (API `GET /api/repositories`). */
 export interface Repository {
   /** Repository owner (GitHub user or organization login). */
