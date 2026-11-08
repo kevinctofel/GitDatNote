@@ -667,3 +667,104 @@ Engines of every changed direct dependency: `vite@6.4.5` `^18 || ^20 || >=22`; `
 ### Out of scope (unchanged)
 
 No source, test, CI, or OpenSpec content changes. No commit, push, or archive performed. Unrelated local changes (`.hermes/skills/*` modifications, untracked Hermes scripts) preserved untouched. No GitHub credentials, repository identifiers, personal names, or emails introduced; encryption keys remain outside SQLite and source control.
+
+## Secure SQLite Session Storage — Task 3.1 (2026-11-06)
+
+Implements OpenSpec decision A-04: encrypted session storage on the server boundary only.
+
+### Module layout (`src/server/session/`)
+
+- `types.ts` — public contract: `SessionUser`, `SessionCredentials`, `SessionLookupResult`, `StoredSession` (holds the decrypted credentials in server memory only — the database row stores only sealed ciphertexts), `CreateSessionInput`, `SessionStorage` interface, `SessionStorageError` + `SessionErrorCode` (`STORAGE_NOT_OPEN`, `INVALID_SESSION_ID`, `INVALID_CREDENTIALS`, `CONFIG_INVALID`, `ENC_KEY_MISSING`, `ENC_KEY_INVALID`, `DECRYPTION_FAILED`, `DB_ERROR`). Task 3.2 consumes this interface; no database access is needed from the frontend.
+- `crypto.ts` — AES-256-GCM `sealSecret`/`openSecret`. Sealed format (versioned, unambiguous): `v1:<iv hex>:<tag hex>:<ciphertext hex>` — 12-byte random IV (NIST-recommended for GCM), 16-byte authentication tag, fresh per encryption. `parseEncryptionKey` accepts exactly 64 hex characters (256 bits); returns `null` otherwise. `openSecret` returns `null` for malformed payloads or failed authentication; callers map that to `DECRYPTION_FAILED` — raw crypto error text never propagates.
+- `config.ts` — `resolveSessionConfig`: strict validation. `SESSION_DB_PATH` (default `./data/sessions.db`; absolute or repo-relative, rejects empty/whitespace/unsafe values), `SESSION_ENCRYPTION_KEY` (required; exactly 64 hex — no truncation, padding, hashing, or derivation from arbitrary passwords), `SESSION_MAX_AGE_DAYS` (default 7; whole days 1–3650; rejects floats, 0, negatives, non-numeric). Malformed/unsafe values are rejected with a stable error, never silently substituted. `ensureSessionDbParent` creates only the missing parent-directory segments, each private (`0700` on POSIX), and never chmod's existing directories. Injectable `now` clock for deterministic tests.
+- `storage.ts` — `openSessionStorage(config)`. SQLite via `better-sqlite3`. `sessions` table, exactly the 10 required columns: `session_id TEXT PK`, `user_login TEXT NOT NULL`, `user_name TEXT NOT NULL`, `user_avatar_url TEXT NOT NULL`, `csrf_token TEXT NOT NULL`, `token_encrypted TEXT NOT NULL`, `refresh_token_encrypted TEXT NOT NULL`, `token_expires_at INTEGER NOT NULL`, `refresh_expires_at INTEGER NOT NULL`, `created_at INTEGER NOT NULL` (epoch ms). Operations: `createSession` (crypto-random 64-hex `session_id`, 64-hex CSRF value, tokens sealed before insert), `getSession` (missing → `missing`; at/past `created_at + maxAge` → `expired`; both enforced in the storage layer), `rotateCredentials` (single statement inside a transaction replaces the encrypted token pair **and both expiry timestamps atomically**; an expired session is reported as `{ status: 'expired' }` before any write), `deleteSession`, `purgeExpiredSessions`, `close`. Every SQLite failure (open, schema, prepare, statement, runtime) is mapped to a stable `SessionStorageError` with code `DB_ERROR` and a fixed message — never SQL text, database paths, or raw SQLite error text; typed session errors raised by the module itself are preserved unchanged. On POSIX the database file is kept private (`0600`), re-secured if an existing file drifted, and initialization fails closed if it cannot be made private. Expiration is a storage-layer guarantee, not left to cookie expiry.
+- `cookies.ts` — fixed documented cookie `gitdatnote_session` (pattern `/^[0-9a-f]{64}$/`). Issue: `HttpOnly; SameSite=Lax; Path=/; Max-Age/Expires` aligned to the session lifetime; `Secure` in production/HTTPS mode or explicit `SESSION_COOKIE_SECURE`, omitted in local HTTP dev per OpenSpec. Parse: malformed/missing cookie → `null` (unauthenticated), never throws. Clear: matching attributes, `Max-Age=0`.
+- `better-sqlite3.d.ts` — minimal local type declaration (constructor, `exec`, `prepare`, `transaction`, `close`, `Statement.run/get/all`, `RunResult`). Deliberate: avoids adding an `@types` package to the dependency tree; declares only the surface this module uses.
+- `index.ts` — barrel export; the sole import surface for task 3.2.
+
+### Encryption format and key requirements
+
+- Algorithm: AES-256-GCM (Node `crypto` built-ins only).
+- `SESSION_ENCRYPTION_KEY`: exactly 64 lowercase-or-uppercase hex characters = 256-bit secret with full entropy. Used verbatim as the key — no truncation, padding, salt, stretch, or derivation. Missing → `ENC_KEY_MISSING`, wrong format/length → `ENC_KEY_INVALID` — initialization failure, never a silent generated key (a silent key would make persisted sessions undecryptable after restart).
+- Storage format: `v1:<iv>:<tag>:<ciphertext>` (all lowercase hex). `v1` is the only accepted version today; unknown versions and malformed payloads return `null` from `openSecret`, which storage maps to `DECRYPTION_FAILED`. Tampering is detected by the GCM tag and fails the same way.
+- Both the access token and refresh token are sealed separately (independent IVs) and stored in their own columns. Expiry timestamps stored as epoch ms integers. Plaintext tokens never reach SQLite, logs, or responses — verified by test (`SELECT *` scan of the table contains no plaintext).
+- Raw crypto/SQL error messages are never propagated: `SessionStorageError` carries stable codes; details are logged server-side only where safe.
+
+### Session lifetime and configuration
+
+- Defaults: `SESSION_DB_PATH=./data/sessions.db`, `SESSION_MAX_AGE_DAYS=7`.
+- Expiration: a session at/past `created_at + maxAgeMs` is rejected as `expired` on retrieval; `purgeExpiredSessions` removes only expired rows (returns count). Cookie `Max-Age`/`Expires` are aligned to the same lifetime but are a UX convenience — the storage layer is authoritative.
+- `/data/` added to `.gitignore` (it was absent); database files can never be committed. `data/` is created on demand with safe, permission-aware parent-directory handling.
+
+### Cookie attributes and lifecycle
+
+- Name: `gitdatnote_session` (fixed, documented in `cookies.ts`).
+- Always: `HttpOnly`, `SameSite=Lax`, `Path=/`.
+- `Secure`: production/HTTPS mode (or explicit `SESSION_COOKIE_SECURE=true`); omitted in local HTTP development per OpenSpec.
+- Lifetime: `Max-Age` + `Expires` derived from the session lifetime (remaining seconds, minimum 0).
+- Clear: `clearSessionCookie` sets the same attributes with `Max-Age=0` and empty value.
+- The session ID travels only in the cookie; it is never placed in API responses, frontend JavaScript, or logs.
+
+### Tests (41 initial + 7 correction regression tests, deterministic)
+
+- `tests/unit/server/session.test.ts` (31): initial 24 — lifecycle (create/retrieve, persistence across close+reopen, delete, missing, expired, configurable lifetime, atomic rotation, selective purge); crypto (round-trip access+refresh, fresh IV/ciphertext per seal, tampered ciphertext, invalid tag, malformed payloads, invalid/missing key, distinct keys, no plaintext in the raw table); config (defaults, explicit valid, missing key, malformed key, malformed max-age, unsafe db path, parent-directory creation, deterministic `maxAgeMs`). Plus 7 correction regression tests (see the correction record below): 2 POSIX file-permission tests, 4 SQLite failure-normalization tests, 1 expired-rotation guard test.
+- `tests/unit/server/session-cookies.test.ts` (17): required attributes present, `Secure` omitted in dev / present in production, `Max-Age`/`Expires` behavior (remaining lifetime, zero floor, invalid max-age rejected), fixed cookie name, clearing, safe parsing of missing/malformed values (returns `null`), secure-mode resolution.
+- All tests use temp databases under the OS tmpdir, fake tokens (`gho_test_*`/`ghr_test_*` — obviously non-real), fake 64-hex test keys, and injected deterministic clocks. No real GitHub credentials, no fake auth routes, no flaky timing.
+
+### Verification (from clean `npm ci`, Node 26.7.0)
+
+- `npm run lint` — 0 (after two self-detected fixes: unused `SCHEMA` constant — table creation was missing until this gate — and missing `better-sqlite3` types, resolved by the local declaration, plus auto-fixed `prefer-const` in tests).
+- `npm run typecheck` — 0 (web + server projects).
+- `npm run test` — **340/340** Vitest across 13 files (299 pre-existing + 41 new; no existing test weakened or removed).
+- `npm run build` — 0 (134 modules). Frontend bundle scanned: contains no session cookie name, key env var, encrypted-token column names, crypto helpers, or `better-sqlite3` references.
+- `npm run build:server` — 0; `dist-server/server/session/` contains the compiled module (server boundary).
+- `npm run test:e2e` — **10/10** Chromium (unchanged; current server behavior is untouched).
+- `npm audit` — 0 vulnerabilities (unchanged since task 2.10; no dependency changes in this task).
+- `openspec validate modernize-gitdatnote-foundation` — valid (2 pre-existing non-blocking length warnings in `spec.md`).
+- `git diff --check` — clean.
+
+### Focused code review corrections (2026-11-06)
+
+Independent source review of the initial Task 3.1 implementation; four narrowly scoped corrections applied, no other scope touched.
+
+**1. SQLite file protection on POSIX.**
+- New database files are made `0600` (SQLite creates them with the process umask, typically world-readable `0644`).
+- Only the missing parent-directory segments are created, each `0700` on POSIX; existing parent directories are never chmod'd (an existing `0755` parent is verified untouched in tests).
+- An existing database file that drifted to a permissive mode is re-secured to `0600` on open; its content is never modified. If the file cannot be made private, initialization fails closed with a stable `DB_ERROR`.
+- `IS_POSIX = process.platform !== 'win32'` gates all permission enforcement and tests (`describe.skipIf`), so behavior and tests are correct on platforms without meaningful permission bits.
+
+**2. SQLite failure normalization.**
+- Open, schema (`db.exec`), prepare, and runtime statement failures all map to `SessionStorageError` with code `DB_ERROR` and fixed, outward-safe messages — never SQL text, database paths, or raw SQLite error text.
+- If initialization fails after the database handle is open (schema or prepare failure), the handle is closed before the error is thrown.
+- Typed session errors raised by the module itself (e.g. `STORAGE_NOT_OPEN`, `INVALID_CREDENTIALS`, `DECRYPTION_FAILED`) are preserved unchanged rather than masked as `DB_ERROR`.
+
+**3. No credential rotation on expired sessions.**
+- `rotateCredentials` runs the expiration check (`created_at + maxAge`) and the credential update in a single `better-sqlite3` transaction: an expired session returns `{ status: 'expired' }` before any write, and the check and update cannot interleave.
+
+**4. Audit corrections.** This section's earlier text used incorrect error codes (`not_found`, `crypto_error`, ...), storage method names (`create`/`retrieve`/`delete`/`purgeExpired`), a wrong cookie-parse result (`undefined` instead of `null`), and a wrong per-file test split (25/16 instead of 24/17). All corrected to match the implementation.
+
+**New regression tests (7):** new-file `0600` + new-directory `0700` + existing parent untouched; existing-file re-secure + content preserved across reopen; corrupt-file open → stable `DB_ERROR`; schema conflict → `DB_ERROR` with the file left usable; runtime statement failure (poisoned `CHECK` constraint) → `DB_ERROR` with no SQL/path leakage; typed-error preservation (`STORAGE_NOT_OPEN`); expired-session rotation refused with stored ciphertexts and expiries byte-for-byte unchanged and the new token values absent from the database.
+
+**Verification after corrections:** focused session suites 48/48; `npm run lint` 0; `npm run typecheck` 0; `npm run test` **347/347** (299 pre-existing + 48 session-suite tests); `npm run build` 0; `npm run build:server` 0; `npm run test:e2e` **10/10**; `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean. Local app verified starting via `npm run dev:server` (`/api/health` 200) and `npm run dev` (root 200, proxied `/api/health` 200, disconnected/sample-preview UI unchanged).
+
+### Security constraints honored
+
+- Encryption key stays outside SQLite and source control (env-only; test keys are fake).
+- No hardcoded personal names, email addresses, or repository identifiers.
+- No GitHub credentials introduced into browser code; bundle scan confirms.
+- No silent key generation at startup; no key truncation/padding/derivation.
+- No raw SQL or token values exposed through any public API surface; stable error codes only.
+- Session database file kept private to the current user on POSIX (mode `0600`).
+- No commit of database files (`/data/` gitignored; no DB artifacts left in the working tree).
+
+### Task boundary (deferred to later tasks, untouched here)
+
+- No OAuth routes, no credential exchange, no `GET /api/session`, no `POST /api/auth/logout`, no repository authorization, no CSRF middleware/enforcement (task 3.3), no token-refresh HTTP calls, no frontend UI — all task 3.2/3.3/3.4/3.5/3.6 scope.
+- No fake routes or fake successful sessions added; the current server behavior is unchanged.
+- No dependency additions, upgrades, or lockfile churn.
+
+### Files changed
+
+Created: `src/server/session/{types,crypto,config,storage,cookies,index,better-sqlite3.d}.ts`; `tests/unit/server/{session.test.ts, session-cookies.test.ts}`.
+Modified: `.gitignore` (added `/data/` with explanatory comment); `openspec/changes/modernize-gitdatnote-foundation/{tasks.md, audit.md}` (this task's completion records, including the correction record above).
+No commit, push, or archive performed; unrelated local changes (`.hermes/skills/*`, untracked Hermes scripts) preserved untouched.
