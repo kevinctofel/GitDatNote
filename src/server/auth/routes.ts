@@ -5,7 +5,8 @@
  * - `GET  /api/auth/github/start`    — begin OAuth (302 to GitHub)
  * - `GET  /api/auth/github/callback` — complete OAuth (302 to the app)
  * - `GET  /api/session`              — session probe for the frontend
- * - `POST /api/auth/logout`          — CSRF-protected session deletion
+ * - `POST /api/auth/logout`          — session deletion; CSRF enforced by
+ *                                     the centralized boundary (task 3.3)
  * - `GET  /api/repositories`         — Task 3.2 repository discovery boundary
  *
  * Security notes:
@@ -345,60 +346,36 @@ export function handleSession(
 /**
  * `POST /api/auth/logout`
  *
- * Requires a valid session and a matching `X-CSRF-Token` header (the only
- * accepted CSRF source). Deletes the session server-side and clears the
- * session cookie.
+ * Task 3.3: this handler executes only after the centralized CSRF boundary
+ * in `src/server/index.ts` has authenticated the session and verified the
+ * session-bound `X-CSRF-Token` header (constant-time). It deletes the
+ * session server-side and clears the session cookie.
  */
 export function handleLogout(
-  req: IncomingMessage,
   res: ServerResponse,
   deps: AuthRouteDeps,
+  sessionId: string,
 ): void {
   if (deps.session === null) {
     sendJson(res, 401, errorDetail('UNAUTHORIZED'));
     return;
   }
-  const sessionId = parseSessionCookie(req.headers.cookie);
-  if (sessionId === null) {
-    sendJson(res, 401, errorDetail('UNAUTHORIZED'));
-    return;
-  }
-  let result: SessionLookupResult;
+  let deleted: boolean;
   try {
-    result = deps.session.storage.getSession(sessionId);
-  } catch (err) {
-    deps.logger.error({ event: 'session_lookup_failed', code: storageErrorName(err) });
-    sendJson(res, 500, errorDetail('INTERNAL_ERROR'));
-    return;
-  }
-  if (result.status !== 'found') {
-    sendJson(res, 401, errorDetail('UNAUTHORIZED'));
-    return;
-  }
-  const header = req.headers['x-csrf-token'];
-  const token = typeof header === 'string' ? header : Array.isArray(header) ? header[0] : '';
-  if (!validateCsrf(token, result.session.csrfToken)) {
-    deps.logger.warn({ event: 'logout_csrf_rejected' });
-    sendJson(res, 403, errorDetail('CSRF_INVALID'));
-    return;
-  }
-  try {
-    deps.session.storage.deleteSession(sessionId);
+    deleted = deps.session.storage.deleteSession(sessionId);
   } catch (err) {
     deps.logger.error({ event: 'session_delete_failed', code: storageErrorName(err) });
     sendJson(res, 500, errorDetail('INTERNAL_ERROR'));
     return;
   }
+  if (deleted === false) {
+    // The validated session no longer exists: nothing to delete.
+    sendJson(res, 401, errorDetail('UNAUTHORIZED'));
+    return;
+  }
   res.writeHead(204, { 'Set-Cookie': clearSessionCookie({ secure: deps.cookieSecure }) });
   res.end();
   deps.logger.info({ event: 'logout' });
-}
-
-function validateCsrf(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided, 'hex');
-  const b = Buffer.from(expected, 'hex');
-  if (a.length === 0 || a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
 }
 
 /**

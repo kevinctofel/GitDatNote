@@ -25,6 +25,13 @@
  *   user: { login, name, avatarUrl }, csrfToken }`.
  * - `POST /api/auth/logout` -> CSRF-protected session deletion (204).
  * - `GET /api/repositories` -> authenticated repository discovery boundary.
+ *
+ * Centralized CSRF security boundary (task 3.3): every state-changing
+ * (`POST`/`PUT`/`DELETE`) `/api/*` request must pass session authentication
+ * plus the session-bound `X-CSRF-Token` header before any handler executes
+ * (see `src/server/middleware/csrf.ts`). Read-only routes — including the
+ * GitHub OAuth callback, which validates its own state parameter — are
+ * unaffected.
  * Missing GitHub App credentials make these routes fail safely (redirect to
  * `/error?reason=auth_unconfigured` or 401) without affecting health,
  * logging, or frontend serving.
@@ -45,6 +52,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createLogger, logRequest, resolveLogLevel } from './middleware/logging.js';
 import type { LogLevel } from './middleware/logging.js';
 import { sendApiNotFound, sendJsonError, sendUnexpectedError } from './middleware/errorHandling.js';
+import { checkCsrf, respondToCsrf } from './middleware/csrf.js';
 import { errorDetail } from '../shared/errors.js';
 import {
   handleAuthCallback,
@@ -166,6 +174,40 @@ export function createApp(options: AppOptions = {}): Server {
         sendJsonError(res, errorDetail('PATH_INVALID'));
         return;
       }
+
+      // Centralized CSRF security boundary (task 3.3, design A-05): every
+      // state-changing /api request must pass session authentication plus
+      // the session-bound X-CSRF-Token header before any handler executes.
+      // The authorization decision is unconditional: when session storage
+      // is unavailable no authenticated session can exist, so the request
+      // fails closed with the established 401 before route dispatch —
+      // future state-changing handlers can never bypass this boundary.
+      const method = req.method ?? 'GET';
+      if (
+        pathname.startsWith('/api/') &&
+        (method === 'POST' || method === 'PUT' || method === 'DELETE')
+      ) {
+        if (session === null) {
+          res.writeHead(401, JSON_HEADERS);
+          res.end(JSON.stringify(errorDetail('UNAUTHORIZED')));
+          return;
+        }
+        const csrf = checkCsrf(req, session.storage, logger);
+        if (csrf.status !== 'ok') {
+          respondToCsrf(res, csrf);
+          return;
+        }
+        if (pathname === '/api/auth/logout' && method === 'POST') {
+          handleLogout(res, authDeps, csrf.sessionId);
+          return;
+        }
+        // No handler is registered for this state-changing route. The
+        // request already proved authentication and CSRF, so the safe
+        // standard 404 is the established response.
+        sendApiNotFound(res);
+        return;
+      }
+
       if (pathname === '/api/health' && req.method === 'GET') {
         res.writeHead(200, JSON_HEADERS);
         res.end(JSON.stringify({ status: 'ok' }));
@@ -185,10 +227,6 @@ export function createApp(options: AppOptions = {}): Server {
       }
       if (pathname === '/api/session' && req.method === 'GET') {
         handleSession(req, res, authDeps);
-        return;
-      }
-      if (pathname === '/api/auth/logout' && req.method === 'POST') {
-        handleLogout(req, res, authDeps);
         return;
       }
       if (pathname === '/api/repositories' && req.method === 'GET') {

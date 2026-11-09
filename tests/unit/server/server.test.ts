@@ -150,17 +150,21 @@ describe('GET /api/health', () => {
     expect(res.body).toBe(JSON.stringify({ status: 'ok' }));
   });
 
-  it('rejects non-GET methods on the health route with the standard JSON 404', async () => {
+  it('rejects state-changing methods on the health route with fail-closed 401', async () => {
+    // Task 3.3 corrected boundary: every state-changing /api request makes
+    // its authorization decision at the centralized boundary before route
+    // dispatch. This harness runs without session storage, so POST
+    // /api/health fails closed with the established 401 (previously it fell
+    // through to the safe 404).
     const server = await startServer();
     const res = await request(portOf(server), '/api/health', 'POST');
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(401);
+    expect(res.contentType).toContain('application/json');
     expect(JSON.parse(res.body)).toEqual({
-      error: {
-        code: 'FILE_NOT_FOUND',
-        message: 'The requested API route was not found.',
-        retryable: false,
-        status: 404,
-      },
+      code: 'UNAUTHORIZED',
+      message: 'Your session is no longer valid. Please sign in again.',
+      retryable: false,
+      status: 401,
     });
   });
 });
