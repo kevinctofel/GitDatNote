@@ -428,20 +428,33 @@ function mockGithub(h: Harness): void {
       return json(200, PROFILE);
     }
     if (url.pathname === '/user/installations') {
-      return json(200, [{ id: 111, account: { login: PROFILE.login } }]);
+      return json(200, {
+        total_count: 1,
+        installations: [
+          {
+            id: 111,
+            account: { login: PROFILE.login },
+            permissions: { contents: 'write' },
+            suspended_at: null,
+          },
+        ],
+      });
     }
     if (
       url.pathname.startsWith('/user/installations/') &&
       url.pathname.endsWith('/repositories')
     ) {
-      return json(200, [
-        {
-          owner: { login: PROFILE.login },
-          name: 'notes',
-          private: true,
-          permissions: { admin: true, push: true, pull: true },
-        },
-      ]);
+      return json(200, {
+        total_count: 1,
+        repositories: [
+          {
+            owner: { login: PROFILE.login },
+            name: 'notes',
+            private: true,
+            permissions: { admin: true, push: true, pull: true },
+          },
+        ],
+      });
     }
     return json(404, { message: 'Not Found' });
   });
