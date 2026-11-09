@@ -53,6 +53,7 @@ import { createLogger, logRequest, resolveLogLevel } from './middleware/logging.
 import type { LogLevel } from './middleware/logging.js';
 import { sendApiNotFound, sendJsonError, sendUnexpectedError } from './middleware/errorHandling.js';
 import { checkCsrf, respondToCsrf } from './middleware/csrf.js';
+import { enforceContentBoundary, matchContentRepositoryRef } from './middleware/repositoryAuth.js';
 import { errorDetail } from '../shared/errors.js';
 import {
   handleAuthCallback,
@@ -201,10 +202,51 @@ export function createApp(options: AppOptions = {}): Server {
           handleLogout(res, authDeps, csrf.sessionId);
           return;
         }
+        // Task 3.4: state-changing content operations pass the CSRF boundary
+        // above, then the repository authorization boundary with write
+        // access — authorization never substitutes for CSRF, and CSRF never
+        // substitutes for authorization.
+        const contentRef = matchContentRepositoryRef(pathname);
+        if (contentRef !== null) {
+          void enforceContentBoundary(req, res, contentRef, 'write', authDeps, logger).then(
+            (authorized: boolean) => {
+              // Authorized: no content handler is registered yet (a later
+              // task), so the standard 404 is the safe response today.
+              if (authorized) sendApiNotFound(res);
+            },
+          ).catch((err: unknown) => {
+            sendUnexpectedError(res, logger, err);
+          });
+          return;
+        }
         // No handler is registered for this state-changing route. The
         // request already proved authentication and CSRF, so the safe
         // standard 404 is the established response.
         sendApiNotFound(res);
+        return;
+      }
+
+      // Task 3.4: fail-closed authorization boundary for the future
+      // content-operation surface (/api/repos/{owner}/{repo}/content). The
+      // content handlers do not exist yet (a later task), so today the only
+      // reachable outcomes are safe errors — or the standard 404 for an
+      // authenticated, authorized request. This boundary runs after the
+      // CSRF boundary above and never substitutes for it: CSRF proves the
+      // request came from the authenticated browser session; authorization
+      // proves the session is permitted on the target repository.
+      const contentRef = matchContentRepositoryRef(pathname);
+      if (contentRef !== null) {
+        const requiredAccess: 'read' | 'write' =
+          method === 'GET' || method === 'HEAD' ? 'read' : 'write';
+        void enforceContentBoundary(req, res, contentRef, requiredAccess, authDeps, logger).then(
+          (authorized: boolean) => {
+            // Authorized: no content handler is registered yet (a later
+            // task), so the standard 404 is the safe response today.
+            if (authorized) sendApiNotFound(res);
+          },
+        ).catch((err: unknown) => {
+          sendUnexpectedError(res, logger, err);
+        });
         return;
       }
 

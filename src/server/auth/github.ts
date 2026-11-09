@@ -20,8 +20,9 @@ import type {
   GitHubUser,
   TokenResponseData,
 } from './types.js';
+import { effectiveRepoAccess, installationAllowsAccess } from './permissions.js';
 
-type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
+export type FetchImpl = (input: string, init?: RequestInit) => Promise<Response>;
 
 const USER_AGENT = 'GitDatNote/2.0';
 
@@ -37,6 +38,47 @@ function statusError(status: number): AuthError | null {
   }
   return null;
 }
+
+/**
+ * Map a classifier for upstream status codes, receiving the response status
+ * and the `X-RateLimit-Remaining` header value (rate-limit context).
+ */
+type StatusErrorMapper = (status: number, rateLimitRemaining: string | null) => AuthError | null;
+
+/**
+ * Strict error mapping for the repository authorization service
+ * (task 3.4). Unlike `statusError`, it distinguishes a genuine rate limit
+ * from a permission denial:
+ *
+ * - 401 → `UNAUTHORIZED` (the user's credentials are not valid).
+ * - 429, or 403 with `X-RateLimit-Remaining: 0` → `RATE_LIMITED` (GitHub's
+ *   documented rate-limit responses).
+ * - any other 403 → `FORBIDDEN` (a permission denial — never an
+ *   authorization success).
+ * - 404 → `NOT_FOUND` (the resource does not exist for this user; a
+ *   private repository must not be revealed as existing).
+ * - 5xx → `GITHUB_UNAVAILABLE`.
+ */
+export const authorizationStatusError: StatusErrorMapper = (status, rateLimitRemaining) => {
+  if (status === 401) {
+    return new AuthError('UNAUTHORIZED', 'GitHub rejected the request.');
+  }
+  if (status === 429 || (status === 403 && rateLimitRemaining === '0')) {
+    return new AuthError('RATE_LIMITED', 'GitHub rate limited the request.');
+  }
+  if (status === 403) {
+    return new AuthError('FORBIDDEN', 'GitHub denied the request.');
+  }
+  if (status === 404) {
+    return new AuthError('NOT_FOUND', 'The requested GitHub resource was not found.');
+  }
+  if (status >= 500) {
+    return new AuthError('GITHUB_UNAVAILABLE', 'GitHub API is unavailable.');
+  }
+  return null;
+};
+
+const defaultStatusMapper: StatusErrorMapper = (status) => statusError(status);
 
 function mapNetworkError(err: unknown): AuthError {
   if (err instanceof AuthError) return err;
@@ -171,15 +213,23 @@ export async function fetchUserProfile(
  * has inside that installation. Membership in the list never implies write
  * access, and no application-wide privileged token is used.
  *
- * Both list endpoints are paginated; `fetchAllPages` (below) follows only
- * trusted GitHub API links and stops at a bounded page limit, failing
- * loudly instead of reporting a partial list as complete.
+ * Both list endpoints are paginated; `fetchAllPages` follows only trusted
+ * GitHub API links, stops at a bounded page limit, and validates every page
+ * against GitHub's documented response envelope (see `parseListPage`),
+ * failing loudly instead of reporting a partial list as complete.
+ * Installations without any contents permission are skipped entirely: none
+ * of their repositories can be operated through GitDatNote.
  */
 export async function listAccessibleRepositories(
   accessToken: string,
   fetchImpl: FetchImpl,
 ): Promise<DiscoveredRepository[]> {
-  const installations = await fetchAllPages('/user/installations', accessToken, fetchImpl);
+  const installations = await fetchAllPages(
+    '/user/installations',
+    accessToken,
+    fetchImpl,
+    'installations',
+  );
   const repos: DiscoveredRepository[] = [];
   const seen = new Set<string>();
   for (const entry of installations) {
@@ -189,10 +239,26 @@ export async function listAccessibleRepositories(
     >;
     const id = record.id;
     if (typeof id !== 'number') continue; // Skip malformed entries.
+    // Suspended installations grant no access (task 3.4: effective permission
+    // requires an active App installation on the repository).
+    if (typeof record.suspended_at === 'string') continue;
+    const installationPermissions =
+      record.permissions !== null &&
+      typeof record.permissions === 'object' &&
+      !Array.isArray(record.permissions)
+        ? (record.permissions as Record<string, unknown>)
+        : {};
+    // An installation with no contents permission at all cannot operate any
+    // of its repositories through GitDatNote, so it is omitted from
+    // discovery entirely (OpenSpec: repositories must be operable through
+    // the App). Read-only installations (contents: "read") still list their
+    // repositories, with write access disabled.
+    if (!installationAllowsAccess(installationPermissions, 'read')) continue;
     const list = await fetchAllPages(
       `/user/installations/${id}/repositories`,
       accessToken,
       fetchImpl,
+      'repositories',
     );
     for (const item of list) {
       const repo = (typeof item === 'object' && item !== null ? item : {}) as Record<
@@ -208,11 +274,19 @@ export async function listAccessibleRepositories(
       if (seen.has(key)) continue;
       seen.add(key);
       const permissions = repo.permissions as Record<string, unknown> | undefined;
+      const userPermissions =
+        permissions !== null && typeof permissions === 'object' && !Array.isArray(permissions)
+          ? (permissions as Record<string, unknown>)
+          : {};
+      // Task 3.4: canRead/canWrite reflect the effective intersection of the
+      // user's per-repository permissions and the installation-level
+      // permissions, so a repository is never listed as writable without
+      // verified write access on both sides.
       repos.push({
         owner,
         name,
-        canRead: permissions?.pull === true,
-        canWrite: permissions?.push === true,
+        canRead: effectiveRepoAccess(userPermissions, installationPermissions, 'read'),
+        canWrite: effectiveRepoAccess(userPermissions, installationPermissions, 'write'),
         isPrivate: repo.private === true,
       });
     }
@@ -267,17 +341,71 @@ function nextPageLink(linkHeader: string | null, path: string): NextPageLink {
 }
 
 /**
- * Fetch a paginated GitHub list endpoint, following only trusted
- * `rel="next"` links (same API origin and path) and bounded by
- * `MAX_PAGES`. Any present-but-untrusted next link (malformed, non-HTTPS,
- * cross-origin, or off-path) aborts discovery with `DISCOVERY_LINK_UNTRUSTED`
- * — a partial list is never reported as complete. If the page limit is
- * reached while more pages remain, throws `DISCOVERY_LIMIT_EXCEEDED`.
+ * The paginated list endpoints supported by `fetchAllPages`. GitHub's
+ * documented responses for both are JSON objects containing the array —
+ * never bare arrays (https://docs.github.com/en/rest/apps/installations):
+ *
+ * - `GET /user/installations` →
+ *     `{ "total_count": <int>, "installations": [...] }`
+ * - `GET /user/installations/{installation_id}/repositories` →
+ *     `{ "total_count": <int>, "repository_selection"?: <string>,
+ *        "repositories": [...] }`
  */
-async function fetchAllPages(
+type ListEndpoint = 'installations' | 'repositories';
+
+/**
+ * Validate one page of a paginated list endpoint against the documented
+ * response envelope for `endpoint`.
+ *
+ * Rejects (fail closed — never a silent empty list, never a partial list):
+ * - bare arrays or non-object bodies: the list must be the named field;
+ * - a missing or non-integer `total_count`;
+ * - a missing, non-array, or oversized `installations`/`repositories`
+ *   field — arbitrary other fields are never accepted as the list;
+ * - a `total_count` inconsistent with the items collected so far.
+ *
+ * `total_count` is validated for consistency but never used to drive
+ * pagination itself: traversal is driven solely by trusted `Link` headers.
+ */
+function parseListPage(data: unknown, endpoint: ListEndpoint, collectedCount: number): unknown[] {
+  const listField = endpoint === 'installations' ? 'installations' : 'repositories';
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw new AuthError('INTERNAL', 'GitHub returned a malformed list response.');
+  }
+  const envelope = data as Record<string, unknown>;
+  const totalCount = envelope['total_count'];
+  if (typeof totalCount !== 'number' || !Number.isInteger(totalCount) || totalCount < 0) {
+    throw new AuthError('INTERNAL', 'GitHub returned a malformed list response.');
+  }
+  const items = envelope[listField];
+  if (!Array.isArray(items) || items.length > PER_PAGE) {
+    throw new AuthError('INTERNAL', 'GitHub returned a malformed list response.');
+  }
+  if (collectedCount + items.length > totalCount) {
+    throw new AuthError('INTERNAL', 'GitHub returned inconsistent pagination metadata.');
+  }
+  return items;
+}
+
+/**
+ * Fetch every page of a GitHub list endpoint, enforcing the security limits
+ * of task 3.2 (bounded pages, trusted pagination links). `statusMapper`
+ * classifies non-2xx responses; the default preserves the established
+ * behavior for the existing discovery flow.
+ *
+ * Every page body must match the documented envelope for `endpoint` (see
+ * `parseListPage`); a malformed page is a hard failure, never a partial
+ * list. Any present-but-untrusted next link (malformed, non-HTTPS,
+ * cross-origin, or off-path) aborts with `DISCOVERY_LINK_UNTRUSTED`; if the
+ * page limit is reached while more pages remain, throws
+ * `DISCOVERY_LIMIT_EXCEEDED`.
+ */
+export async function fetchAllPages(
   path: string,
   accessToken: string,
   fetchImpl: FetchImpl,
+  endpoint: ListEndpoint,
+  statusMapper: StatusErrorMapper = defaultStatusMapper,
 ): Promise<unknown[]> {
   let url = new URL(GITHUB_API_BASE + path);
   url.searchParams.set('per_page', String(PER_PAGE));
@@ -296,7 +424,7 @@ async function fetchAllPages(
       throw mapNetworkError(err);
     }
     if (!response.ok) {
-      const mapped = statusError(response.status);
+      const mapped = statusMapper(response.status, response.headers.get('x-ratelimit-remaining'));
       throw mapped ?? new AuthError('INTERNAL', 'GitHub returned an unexpected error.');
     }
     let data: unknown;
@@ -305,10 +433,7 @@ async function fetchAllPages(
     } catch {
       throw new AuthError('INTERNAL', 'GitHub returned a malformed response.');
     }
-    if (!Array.isArray(data) || data.length > PER_PAGE) {
-      throw new AuthError('INTERNAL', 'GitHub returned an unexpected response.');
-    }
-    items.push(...data);
+    items.push(...parseListPage(data, endpoint, items.length));
     const link = nextPageLink(response.headers.get('link'), path);
     if (link.kind === 'untrusted') {
       throw new AuthError(

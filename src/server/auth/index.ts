@@ -33,6 +33,20 @@ export {
   type AuthRouteDeps,
 } from './routes.js';
 export {
+  effectiveRepoAccess,
+  installationAllowsAccess,
+  installationContentPermission,
+  userAllowsAccess,
+  validateRepositoryRef,
+  type ContentPermission,
+  type RequiredRepoAccess,
+} from './permissions.js';
+export {
+  authorizeRepository,
+  type AuthorizeRepositoryDeps,
+  type RepositoryAuthorization,
+} from './authorization.js';
+export {
   AuthError,
   type AuthConfig,
   type AuthConfigReason,
@@ -41,6 +55,8 @@ export {
   type ConsumeResult,
   type DiscoveredRepository,
   type GitHubUser,
+  type InstallationInfo,
+  type InstallationRepositoryInfo,
   type PendingStateStore,
   type TokenResponseData,
 } from './types.js';

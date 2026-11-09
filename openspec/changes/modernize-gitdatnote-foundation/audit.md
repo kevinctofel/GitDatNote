@@ -869,3 +869,162 @@ Future state-changing routes: register the handler under `/api/` in the dispatch
 Created: `src/server/middleware/csrf.ts` (160 lines); `tests/unit/server/csrf.test.ts` (949 lines, 60 tests).
 Modified: `src/server/index.ts` (+42/−4: imports, doc comment, centralized CSRF boundary before dispatch with the unconditional authorization decision — fail-closed flat 401 `UNAUTHORIZED` when session storage is unavailable, `checkCsrf`/`respondToCsrf` otherwise — and the `csrf.sessionId` handoff; the previous logout 401 fallback was removed as no longer necessary); `src/server/auth/routes.ts` (+14/−37, net −23: `handleLogout` signature `(res, deps, sessionId)`, duplicated per-handler CSRF validation and its helper removed, logout behavior preserved); `tests/unit/server/server.test.ts` (+12/−8: the `POST /api/health` contract updated to the corrected fail-closed 401 in the storage-unavailable state); `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.3 marked complete with evidence); `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+45: this section).
 No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `fe98b9a`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.
+
+## Task 3.4 — Repository authorization (dual: connected user + App installation)
+
+### Implementation summary
+
+A reusable, server-side repository authorization service that authorizes a repository operation only when **both** conditions hold: (1) the connected GitHub user has the required access on the target repository, and (2) the GitHub App's installation for the requested owner carries the required content permission with the repository inside its selected repository set. Read-only repositories are never treated as writable; unauthorized access fails safely with `403 REPO_NOT_ALLOWED` (no existence leakage). No content editing, publishing, or repository creation was introduced — only the service, the fail-closed HTTP boundary for the future `/api/repos/{owner}/{repo}/content` surface, and truthful `canRead`/`canWrite` discovery flags.
+
+### Verified GitHub API permission semantics
+
+Verified against the current official GitHub REST documentation (App authorization endpoints) before implementing:
+
+- `GET /user/installations` (called with the connected user's own user access token) returns the App installations the user has access to. Each entry's `permissions` object is the **App's installation-level** permission map on that installation's selected repository set (e.g. `contents: "read" | "write" | "none"`); `suspended_at` is a non-null string while the installation is suspended.
+- `GET /user/installations/{installation_id}/repositories` lists the repositories inside that installation's selected set. Each entry's `permissions` object is the **connected user's** effective per-repository permission visible through the App (`pull: boolean`, `push: boolean`).
+- The two objects answer different questions — what the App may do, and what the user may do — so effective access is their **intersection**. Repository visibility (appearing in the list) does not imply write permission; ownership does not imply App access; an installation's general permission never applies outside its selected repository set; `/user/repos` is never consulted or assumed.
+- The connected user's existing user-to-server token is sufficient to evaluate both sides — no App-level JWT or installation token is required or used (per the task constraint to avoid unnecessary privileged credentials).
+- A `404` from either endpoint is ambiguous (no installation for this user / private or otherwise inaccessible repository) and must fail closed — it is never treated as authorization, and it must not reveal a private repository's existence.
+- Rate limiting surfaces as `429` or as `403` with `X-RateLimit-Remaining: 0`; a plain `403` is a permission denial.
+
+Note: the pre-existing `statusError` helper (used by `routes.ts`) maps any `403` to `RATE_LIMITED` — behavior documented in Tasks 3.2/3.3. The authorization path uses a new strict mapper (`authorizationStatusError`) that distinguishes rate-limit signals from true denials, and under which a `403` can never become an authorization success.
+
+### Permission predicates (`src/server/auth/permissions.ts`, 122 lines)
+
+Pure functions shared by repository discovery and the per-operation authorization service so the two surfaces can never drift:
+
+- `installationContentPermission(permissions)` — normalizes the installation-level `permissions` object to its `contents` level (`'read'`/`'write'`/`'none'`); anything missing, non-object, or unexpected normalizes to `'none'`.
+- `installationAllowsAccess(permissions, access)` — read is satisfied by `contents: "read"` **or** `"write"`; write requires `contents: "write"` exactly.
+- `userAllowsAccess(permissions, access)` — read requires `pull === true`; write requires `push === true && pull === true` (a `push` without `pull` is malformed/ambiguous and never grants write). Missing fields or non-boolean values never grant access.
+- `effectiveRepoAccess(userPermissions, installationPermissions, access)` — the intersection; both sides must grant.
+- `validateRepositoryRef(owner, repo)` — owner 1–39 chars `[A-Za-z0-9-]` (alphanumeric + hyphens), repo 1–100 chars `[A-Za-z0-9._-]`; malformed references are rejected locally, never sent upstream, never echoed back.
+
+### Authorization service (`src/server/auth/authorization.ts`, 251 lines)
+
+Public interface:
+
+```ts
+async function authorizeRepository(
+  session: StoredSession | null,
+  owner: string,
+  repo: string,
+  requiredAccess: 'read' | 'write',
+  deps: { fetchImpl?: FetchImpl } = {},
+): Promise<RepositoryAuthorization>
+
+type RepositoryAuthorization =
+  | { status: 'authorized'; owner: string; repo: string; access: 'read' | 'write' }
+  | { status: 'unauthorized' }
+  | { status: 'denied' };
+```
+
+The authorized result carries only owner/repo/access — never tokens, credentials, or installation details. Flow (each step fail-closed, all data fresh — permission state from an earlier discovery call is never cached or trusted):
+
+1. Malformed reference → `denied` (local, no upstream request).
+2. No session or empty access token → `unauthorized` (no upstream request).
+3. `GET /user/installations` — select an **unsuspended** installation whose account login matches the requested **owner** (case-insensitive); when several match, the lowest installation id is used (deterministic across calls). None → `denied`.
+4. **App-level gate** — the selected installation must carry the required content permission (`installationAllowsAccess`); otherwise `denied` (checked before the repository listing is even fetched).
+5. `GET /user/installations/{id}/repositories` — the repository must appear in this installation's selected set (owner + name, case-insensitive); absent → `denied`. Every matching entry must satisfy `effectiveRepoAccess` — duplicate entries with inconsistent permissions fail closed; all agreeing entries authorize.
+6. Success → `{ status: 'authorized', owner, repo, access }`.
+
+Upstream failure mapping (new `authorizationStatusError` mapper in `src/server/auth/github.ts`): `401` → `unauthorized`; `403` (plain) and `404` → `denied` — never a success, never an existence leak; `429` or `403` with `X-RateLimit-Remaining: 0` → `RATE_LIMITED`; `5xx` or network failure → `GITHUB_UNAVAILABLE`. Rate-limit, unavailability, and internal transport failures propagate as `AuthError` for the caller to map to `429`/`502`/`500` — they are never converted into authorization.
+
+Read/write access is established exactly as above: read requires user `pull: true` **and** installation `contents` ∈ {read, write}; write requires user `push: true && pull: true` **and** installation `contents: "write"`. A repository visible to the user but read-only on either side is never writable.
+
+### HTTP boundary (`src/server/middleware/repositoryAuth.ts`, 151 lines)
+
+- `matchContentRepositoryRef(pathname)` — recognizes the future content route shape `/api/repos/{owner}/{repo}/content` and any path beneath it (regex `/^\/api\/repos\/([^/]+)\/([^/]+)\/content(?:\/|$)/`); returns `{owner, repo}` or `null` without registering any fake endpoint. Owner/repo are re-validated inside `authorizeRepository`.
+- `enforceContentBoundary(req, res, ref, requiredAccess, deps, logger) → Promise<boolean>` — gates the session (storage unavailable / missing cookie / session not found → `401 UNAUTHORIZED`; storage failure → `500 INTERNAL_ERROR`), runs a **fresh** `authorizeRepository`, maps `unauthorized` → `401`, `denied` → `403 REPO_NOT_ALLOWED` (structured warn event `content_boundary_denied`, no permission details), propagates `AuthError` codes (`RATE_LIMITED` → `429`, `GITHUB_UNAVAILABLE` → `502`, others → `500`), and unexpected failures → `500 INTERNAL_ERROR`. Returns `true` only when authorized; the caller then responds per its own route rules — today the standard 404 because no content handler is registered yet.
+
+Wiring in `src/server/index.ts` (both dispatch branches, ahead of the standard 404 fallthrough):
+
+- GET/HEAD: boundary runs with `read` for `GET`/`HEAD` and `write` otherwise.
+- POST/PUT/DELETE: the centralized CSRF boundary (Task 3.3) runs first, then the authorization boundary with `write`. CSRF proves the request came from the authenticated browser session; authorization proves the session is permitted on the target repository. Each is mandatory; neither substitutes for the other.
+- An authenticated, authorized request against the (not-yet-existing) content route therefore receives the standard 404 today; every unauthorized or failed request receives its mapped safe error. This is the integration seam for the future content-operation task.
+
+### Discovery integration (`src/server/auth/github.ts`)
+
+`listAccessibleRepositories` now:
+
+- skips installations with `suspended_at` set (a suspended installation grants no access);
+- reads each installation-level `permissions` map;
+- computes `canRead`/`canWrite` per repository as `effectiveRepoAccess(userPermissions, installationPermissions, …)` — a repository is never listed as writable without verified write access on both sides, and visible-but-not-writable repositories are reported read-only;
+- normalizes entries into `InstallationInfo` / `InstallationRepositoryInfo` (new types in `src/server/auth/types.ts`), skipping malformed entries.
+
+`GET /api/repositories` therefore returns truthful flags under the dual-permission model, and the repository selector can rely on them for read-only affordances (UI wiring is Task 3.6).
+
+### Failure handling
+
+- Every failure is safe, typed, and logged without credentials: `401 UNAUTHORIZED` (no session, session-less cookie, GitHub `401`), `403 REPO_NOT_ALLOWED` (denied — not installed, outside the selection, excluded, read-only, malformed fields, ambiguous `404`, inconsistent duplicates, plain GitHub `403`), `429 RATE_LIMITED`, `502 GITHUB_UNAVAILABLE` (`5xx`, network failure — authorization is never granted), `500 INTERNAL_ERROR` (storage or unexpected failure).
+- Malformed inputs (missing/malformed owner, name, permissions, account) are skipped or fail closed — never authorized.
+- The service does not throw for expected upstream failures (the typed result is the contract); transport `AuthError`s and unexpected errors propagate to the boundary's safe mapping.
+- Responses and logs contain no tokens, credentials, permission details, repository contents, session IDs, or upstream bodies.
+
+### Test evidence (`tests/unit/server/authorization.test.ts` — 57 tests, 1220 lines, deterministic mocks, no real GitHub credentials)
+
+- **29 service-level tests** for `authorizeRepository` (mocked fetch): grant when both sides allow (read and write); each one-sided denial (user read-only, installation read-only, user write + installation read-only, installation write + user read-only); no installation for the requested owner; repository excluded from the installation selection; repository of another owner; unrelated repository for the authenticated user; installation with no contents permission at all; malformed/missing permission fields; missing/malformed installation account; safe denial on GitHub `404` for the repository list and the installation list; `401` → `unauthorized`; plain `403` → denial (never a success); rate-limit propagation (`429`, and `403` with `X-RateLimit-Remaining: 0`); `5xx` → `GITHUB_UNAVAILABLE`; network failure grants nothing; null session makes no upstream request; malformed repository references denied locally before any request; owner/repo matched case-insensitively (GitHub semantics); suspended installations skipped; lowest-id deterministic selection among multiple matches; permission changed after an earlier discovery honored (fresh check); repository removed from the installation after discovery denied; duplicate entries (inconsistent → fail closed, all agreeing → authorized); no credentials or installation details in the authorized result.
+- **15 integration tests** over the real `createApp` server (mocked GitHub): unauthenticated content read → `401 UNAUTHORIZED`; unauthenticated mutation → `401 UNAUTHORIZED` (CSRF boundary fires first); authenticated + authorized read reaches the not-yet-existing handler as the standard 404; user with read-only access denied on the mutation path; mutation without a CSRF token → `CSRF_INVALID` (CSRF boundary intact, authorization never reached); authenticated, authorized, CSRF-validated write → standard 404; repository outside the App installation → `403 REPO_NOT_ALLOWED`; repository excluded from the installation selection → `403 REPO_NOT_ALLOWED`; GitHub `401` → `401 UNAUTHORIZED` on the boundary; GitHub plain `403` → `403 REPO_NOT_ALLOWED`; GitHub `404` → safe `403` (no existence leak); rate limit → `429 RATE_LIMITED`; `5xx` → `502 GITHUB_UNAVAILABLE`; network failure → `502` (no authorization); no credentials in responses or server logs.
+- **2 matcher tests**: `matchContentRepositoryRef` parses owner/repo from content paths; rejects non-content paths.
+- **3 discovery-flag tests**: truthful read/write flags under the dual model; read-only installation ⇒ everything read-only even if the user can push; installation without contents permission ⇒ repositories omitted from discovery entirely (exact entry count + entries asserted, so the check cannot pass vacuously — see compatibility-fix section below).
+- **8 GitHub list response envelope regression tests** (added by the Task 3.4 compatibility fix; see below).
+
+Existing discovery tests remain truthful: the default installation fixture in `tests/unit/server/auth.test.ts` now carries `permissions: { contents: 'write' }` and `suspended_at: null` (+8/−1, no assertions weakened or removed).
+
+### Verification gates (fresh `npm ci`, re-run after the compatibility fix)
+
+`npm ci` clean; `npm run lint` 0; `npm run typecheck` 0; focused auth suites **170/170** (`auth.test.ts` 71, `authorization.test.ts` 57, `csrf.test.ts` 42); `npm run test` **520/520** across 16 files (463 baseline + 49 task-3.4 + 8 envelope regression tests); `npm run build` 0; `npm run build:server` 0; `npm run test:e2e` **10/10**; `npm audit` 0 vulnerabilities; `openspec validate modernize-gitdatnote-foundation` valid (2 pre-existing warnings from spec requirement length, unchanged); `git diff --check` clean.
+
+### GitHub API Response Compatibility Fix (2026-11-09)
+
+Independent source review found one blocking defect: `fetchAllPages` in `src/server/auth/github.ts` consumed `response.json()` as a **bare array**, but the official GitHub REST documentation (`GET /user/installations` and `GET /user/installations/{installation_id}/repositories`, https://docs.github.com/en/rest/apps/installations) documents both endpoints as returning **JSON objects containing arrays** — `{ total_count: N, installations: [...] }` and `{ total_count: N, repositories: [...] }` respectively. With the old parser, live responses would be treated as empty lists (or fail), silently breaking discovery and authorization.
+
+**Corrected response contract (now enforced):**
+
+- Endpoint-aware parsing: the installations endpoint accepts only an object with an `installations` array; the repositories endpoint accepts only an object with a `repositories` array. Any other shape — bare array, missing field, non-object body, non-array field, unknown/extra field used as the list — is rejected. Arbitrary response fields are never accepted as the list.
+- `total_count` must be a non-negative integer (GitHub sends a number). It is validated for **consistency only** (`total_count === array.length` on every page, including multi-page responses); pagination remains driven by the `Link` header as before — `total_count` never replaces pagination links.
+- Each page's list length must be ≤ 100 (GitHub's page cap).
+- Malformed bodies are rejected safely: they never become empty lists, never authorize, and never leak partial data.
+- Bounded pagination and the trusted `https://api.github.com` origin + exact-path checks on `Link` headers are preserved unchanged; an advertised next page that cannot be fetched or validated still fails closed with no partial list returned.
+
+**Code changes (narrowly scoped):**
+
+- `src/server/auth/github.ts` (+141/−29): new endpoint-aware parser `parseListPage(body, endpoint)`; `fetchAllPages` now takes a `ListEndpoint` (`'installations' | 'repositories'`) and applies the matching envelope; `listAccessibleRepositories` calls it with `'installations'`/`'repositories'`; the authorization service in `src/server/auth/authorization.ts` consumes the **same** `fetchAllPages` (no separate pagination implementation), so both surfaces share one parser and one failure semantics.
+- Discovery behavior decision (documented, consistent with OpenSpec): installations whose App-level `permissions` lack `contents` access are **excluded from discovery entirely** (their repositories cannot be operated on through GitDatNote), while read-only installations (App `contents: "read"`, or user `pull` without `push`) remain listed with truthful read-only `canRead`/`canWrite` flags. `listAccessibleRepositories` changed accordingly (+141/−29 total includes this).
+
+**Test fixture corrections (mocked GitHub responses now use the documented envelopes):**
+
+- `tests/unit/server/auth.test.ts`: default discovery fixture now `{ total_count: 1, installations: [{ id: 111, account, permissions: { contents: 'write' }, suspended_at: null }] }`; no assertions weakened or removed.
+- `tests/unit/server/authorization.test.ts`: the `GitHubScenario` fixture (and the integration harness's automatic envelope wrapping, plus raw-body override for malformed cases) now produce `{ total_count: N, installations: [...] }` / `{ total_count: N, repositories: [...] }`.
+- `tests/unit/server/csrf.test.ts`: the shared `mockGithub` helper now returns documented envelopes for both endpoints (the CSRF suite's GitHub-dependent routes keep working).
+
+**Eight explicit regression tests added** (`tests/unit/server/authorization.test.ts`, "GitHub list response envelope" describe block):
+
+1. A valid installations envelope is accepted.
+2. A valid repositories envelope is accepted.
+3. Multi-page responses aggregate correctly (two pages per endpoint, `total_count` consistent across pages).
+4. Missing or malformed envelope fields are rejected safely (`installations` field missing entirely; `installations` not an array; non-object body — each fails with `AuthError` code `INTERNAL`, never an empty list).
+5. A bare array is not mistakenly accepted as a valid response.
+6. Permission checks work with realistic GitHub response objects (authorized read on a read-capable repository; write denied on a user-read-only repository; write denied on an App-read-only installation — asserting the full `RepositoryAuthorization` object contract).
+7. An authorized repository can be discovered and authorized using realistic mocks (discovery returns the exact repository entry; `authorizeRepository` returns `{ status: 'authorized', owner, repo, access: 'write' }`).
+8. Untrusted pagination links still fail without partial success or token leakage (`next` link to a non-`api.github.com` origin → `DISCOVERY_LINK_UNTRUSTED`, zero entries returned, no token in the request).
+
+**Vacuous discovery test corrected:** "omits repositories whose installation lacks contents permission entirely" previously looped over a result that could be empty (passing vacuously). It now asserts the exact repository count **and** the expected entries (excluded installation's repository absent; read-only installation's repository present with `canRead: true, canWrite: false`), so the test cannot pass on an empty result.
+
+**Unchanged (preserved security architecture):** OAuth/PKCE/session handling; Task 3.3 CSRF middleware; the repository authorization interface; the dual user-plus-App permission requirement; fresh per-operation permission checks; GitHub HTTP error mapping; frontend connected/disconnected behavior; content-root configuration; unrelated dependencies/features; unrelated `.hermes/skills/` files. No commit, push, or archive; Task 3.5 not started.
+
+### Local verification (no credentials configured)
+
+Dev server + Vite as in Tasks 3.2/3.3: `GET /api/health` → 200; unauthenticated `GET /api/session` → `{"connected":false}`; unauthenticated `GET /api/repositories` → 401 `UNAUTHORIZED`; unauthenticated `GET` on a content path → 401 `UNAUTHORIZED` (authorization boundary); unauthenticated mutation on a content path → 401 `UNAUTHORIZED` (CSRF boundary first, per Task 3.3 — authorization is never reached for anonymous mutations). Without GitHub credentials configured, the UI shows the safe `auth_unconfigured` error view (no stack trace, no secrets); sample repository preview and Markdown rendering unchanged. "GitHub Connect still initiates exactly one navigation" was NOT verifiable live (no real App credentials in this environment); the route's failure path was verified instead and is safe. Server logs (structured JSON events) and the built client bundle contain no credentials, session IDs, or CSRF tokens. Live GitHub authorization was NOT performed; all GitHub-facing behavior is verified against mocks.
+
+### Task boundary (deferred, untouched here)
+
+- Future content-operation handlers: register in the dispatch table immediately after the `enforceContentBoundary` blocks in `src/server/index.ts`; replace the `sendApiNotFound` in the authorized branch with the real handler. The boundary (read/write by method, fresh check per request) remains the sole authorization gate; handlers must not re-implement CSRF or authorization.
+- `canRead`/`canWrite` from `GET /api/repositories` is now truthful under the dual model and can drive the UI's read-only affordances (Task 3.6).
+- No content-editing, publishing, or repository-creation functionality; no new public endpoint beyond the boundary seam; no App-level (installation) tokens; no changes to unrelated files.
+
+### Files changed
+
+Created: `src/server/auth/permissions.ts` (122 lines); `src/server/auth/authorization.ts` (251 lines); `src/server/middleware/repositoryAuth.ts` (151 lines); `tests/unit/server/authorization.test.ts` (1002 lines, 49 tests).
+Modified: `src/server/auth/github.ts` (+71/−5: new strict `authorizationStatusError` mapper; discovery skips suspended installations, reads installation-level permissions, computes truthful `canRead`/`canWrite` via `effectiveRepoAccess`); `src/server/auth/types.ts` (+29: `InstallationInfo`, `InstallationRepositoryInfo`, `FORBIDDEN`/`NOT_FOUND` error codes); `src/server/auth/index.ts` (+16: exports for the new modules and types); `src/server/index.ts` (+42: authorization boundary wired in both dispatch branches ahead of the standard 404 fallthrough); `tests/unit/server/auth.test.ts` (+8/−1: default installation mock fixture now carries `permissions: { contents: 'write' }` and `suspended_at: null`); `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.4 marked complete with evidence); `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
+
+No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `342bab7`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.

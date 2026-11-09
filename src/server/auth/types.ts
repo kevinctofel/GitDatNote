@@ -42,6 +42,8 @@ export type AuthErrorCode =
   | 'DISCOVERY_LINK_UNTRUSTED'
   | 'GITHUB_UNAVAILABLE'
   | 'RATE_LIMITED'
+  | 'FORBIDDEN'
+  | 'NOT_FOUND'
   | 'UNAUTHORIZED'
   | 'INTERNAL';
 
@@ -99,4 +101,31 @@ export interface DiscoveredRepository {
   readonly canRead: boolean;
   readonly canWrite: boolean;
   readonly isPrivate: boolean;
+}
+
+/**
+ * An App installation reported by `GET /user/installations` (normalized
+ * subset). `permissions` is the installation-level permission map GitHub
+ * reports (e.g. `{ contents: "read" }`); it is the App's permission on the
+ * repositories inside this installation's selected repository set.
+ */
+export interface InstallationInfo {
+  readonly id: number;
+  readonly account: { readonly login: string; readonly id: number } | null;
+  readonly permissions: Record<string, unknown>;
+  /** `null` when the installation is active. */
+  readonly suspendedAt: string | null;
+}
+
+/**
+ * A repository reported by
+ * `GET /user/installations/{installation_id}/repositories` (normalized
+ * subset). `permissions` is the connected user's per-repository permission
+ * map (`pull`/`push` booleans).
+ */
+export interface InstallationRepositoryInfo {
+  readonly owner: string;
+  readonly name: string;
+  readonly isPrivate: boolean;
+  readonly permissions: Record<string, unknown>;
 }

@@ -184,6 +184,25 @@ function json(
   });
 }
 
+/**
+ * Wrap list items in GitHub's documented response envelope
+ * (https://docs.github.com/en/rest/apps/installations). The list endpoints
+ * return objects containing the array — never bare arrays.
+ */
+function installationsEnvelope(installations: unknown[]): {
+  total_count: number;
+  installations: unknown[];
+} {
+  return { total_count: installations.length, installations };
+}
+
+function repositoriesEnvelope(repositories: unknown[]): {
+  total_count: number;
+  repositories: unknown[];
+} {
+  return { total_count: repositories.length, repositories };
+}
+
 interface GitHubMockOptions {
   profile?: Record<string, unknown>;
   repos?: unknown;
@@ -205,16 +224,25 @@ function mockGithub(h: Harness, opts: GitHubMockOptions = {}): void {
       return json(opts.userStatus ?? 200, profile);
     }
     if (url.pathname === '/user/installations') {
+      const installations = opts.installations ?? [
+        {
+          id: 111,
+          account: { login: PROFILE.login },
+          permissions: { contents: 'write' },
+          suspended_at: null,
+        },
+      ];
       return json(
         opts.installationsStatus ?? 200,
-        opts.installations ?? [{ id: 111, account: { login: PROFILE.login } }],
+        Array.isArray(installations) ? installationsEnvelope(installations) : installations,
       );
     }
     if (
       url.pathname.startsWith('/user/installations/') &&
       url.pathname.endsWith('/repositories')
     ) {
-      return json(200, opts.repos ?? DEFAULT_REPOS);
+      const repos = opts.repos ?? DEFAULT_REPOS;
+      return json(200, Array.isArray(repos) ? repositoriesEnvelope(repos) : repos);
     }
     return json(404, { message: 'Not Found' });
   });
@@ -949,8 +977,8 @@ describe('GET /api/repositories', () => {
     const h = await createHarness();
     mockGithub(h, {
       installations: [
-        { id: 1, account: { login: 'a' } },
-        { id: 2, account: { login: 'b' } },
+        { id: 1, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+        { id: 2, account: { login: 'b' }, permissions: { contents: 'write' }, suspended_at: null },
       ],
     });
     const { sessionCookie } = await completeSignin(h);
@@ -1037,24 +1065,42 @@ describe('GET /api/repositories', () => {
       if (url.pathname === '/user/installations') {
         const page = Number(url.searchParams.get('page') ?? '1');
         if (page === 1) {
-          return json(200, [{ id: 111, account: { login: 'a' } }], {
-            link: '<https://api.github.com/user/installations?per_page=100&page=2> rel="next"',
-          });
+          return json(
+            200,
+            {
+              total_count: 2,
+              installations: [
+                { id: 111, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+              ],
+            },
+            { link: '<https://api.github.com/user/installations?per_page=100&page=2> rel="next"' },
+          );
         }
-        return json(200, [{ id: 222, account: { login: 'b' } }]);
+        return json(
+          200,
+          {
+            total_count: 2,
+            installations: [
+              { id: 222, account: { login: 'b' }, permissions: { contents: 'write' }, suspended_at: null },
+            ],
+          },
+        );
       }
       if (url.pathname === '/user/installations/111/repositories') {
-        return json(200, DEFAULT_REPOS);
+        return json(200, { total_count: DEFAULT_REPOS.length, repositories: DEFAULT_REPOS });
       }
       if (url.pathname === '/user/installations/222/repositories') {
-        return json(200, [
-          {
-            owner: { login: 'octo-tester' },
-            name: 'more-notes',
-            private: false,
-            permissions: { pull: true, push: false },
-          },
-        ]);
+        return json(200, {
+          total_count: 1,
+          repositories: [
+            {
+              owner: { login: 'octo-tester' },
+              name: 'more-notes',
+              private: false,
+              permissions: { pull: true, push: false },
+            },
+          ],
+        });
       }
       return json(404, { message: 'Not Found' });
     });
@@ -1080,12 +1126,19 @@ describe('GET /api/repositories', () => {
     h.fetchImpl.mockImplementation(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === '/user/installations') {
-        return json(200, [{ id: 111, account: { login: 'a' } }], {
-          link: '<https://evil.example/user/installations?per_page=100&page=2> rel="next"',
-        });
+        return json(
+          200,
+          {
+            total_count: 1,
+            installations: [
+              { id: 111, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+            ],
+          },
+          { link: '<https://evil.example/user/installations?per_page=100&page=2> rel="next"' },
+        );
       }
       if (url.pathname === '/user/installations/111/repositories') {
-        return json(200, DEFAULT_REPOS);
+        return json(200, { total_count: DEFAULT_REPOS.length, repositories: DEFAULT_REPOS });
       }
       return json(404, { message: 'Not Found' });
     });
@@ -1117,12 +1170,19 @@ describe('GET /api/repositories', () => {
     h.fetchImpl.mockImplementation(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === '/user/installations') {
-        return json(200, [{ id: 111, account: { login: 'a' } }], {
-          link: '<http://api.github.com/user/installations?per_page=100&page=2> rel="next"',
-        });
+        return json(
+          200,
+          {
+            total_count: 1,
+            installations: [
+              { id: 111, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+            ],
+          },
+          { link: '<http://api.github.com/user/installations?per_page=100&page=2> rel="next"' },
+        );
       }
       if (url.pathname === '/user/installations/111/repositories') {
-        return json(200, DEFAULT_REPOS);
+        return json(200, { total_count: DEFAULT_REPOS.length, repositories: DEFAULT_REPOS });
       }
       return json(404, { message: 'Not Found' });
     });
@@ -1144,12 +1204,19 @@ describe('GET /api/repositories', () => {
     h.fetchImpl.mockImplementation(async (input: string) => {
       const url = new URL(input);
       if (url.pathname === '/user/installations') {
-        return json(200, [{ id: 111, account: { login: 'a' } }], {
-          link: '<not a valid url> rel="next"',
-        });
+        return json(
+          200,
+          {
+            total_count: 1,
+            installations: [
+              { id: 111, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+            ],
+          },
+          { link: '<not a valid url> rel="next"' },
+        );
       }
       if (url.pathname === '/user/installations/111/repositories') {
-        return json(200, DEFAULT_REPOS);
+        return json(200, { total_count: DEFAULT_REPOS.length, repositories: DEFAULT_REPOS });
       }
       return json(404, { message: 'Not Found' });
     });
@@ -1174,7 +1241,12 @@ describe('GET /api/repositories', () => {
         // Always advertise another page: the safety limit is exceeded.
         return json(
           200,
-          [{ id: page, account: { login: 'a' } }],
+          {
+            total_count: 1000,
+            installations: [
+              { id: page, account: { login: 'a' }, permissions: { contents: 'write' }, suspended_at: null },
+            ],
+          },
           { link: `<https://api.github.com/user/installations?per_page=100&page=${page + 1}> rel="next"` },
         );
       }
