@@ -60,3 +60,10 @@ export {
   type PendingStateStore,
   type TokenResponseData,
 } from './types.js';
+export {
+  createTokenRefreshService,
+  REFRESH_SAFETY_WINDOW_MS,
+  type AccessTokenOutcome,
+  type TokenRefreshDeps,
+  type TokenRefreshService,
+} from './refresh.js';

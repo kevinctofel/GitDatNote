@@ -1028,3 +1028,122 @@ Created: `src/server/auth/permissions.ts` (122 lines); `src/server/auth/authoriz
 Modified: `src/server/auth/github.ts` (+71/−5: new strict `authorizationStatusError` mapper; discovery skips suspended installations, reads installation-level permissions, computes truthful `canRead`/`canWrite` via `effectiveRepoAccess`); `src/server/auth/types.ts` (+29: `InstallationInfo`, `InstallationRepositoryInfo`, `FORBIDDEN`/`NOT_FOUND` error codes); `src/server/auth/index.ts` (+16: exports for the new modules and types); `src/server/index.ts` (+42: authorization boundary wired in both dispatch branches ahead of the standard 404 fallthrough); `tests/unit/server/auth.test.ts` (+8/−1: default installation mock fixture now carries `permissions: { contents: 'write' }` and `suspended_at: null`); `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.4 marked complete with evidence); `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
 
 No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `342bab7`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.
+
+## Task 3.5 — Secure token refresh lifecycle (GitHub App user tokens)
+
+### Implementation summary
+
+Task 3.5 required the missing GitHub App **user-token refresh lifecycle** plus security regression coverage for token rotation, single-use refresh tokens, and revocation. Scenarios already covered by earlier tasks (successful authorization, state mismatch, consent denied, expired pending session, missing/incorrect CSRF token including logout, unauthorized repository, session expiry, revocation mid-session) were verified present in `tests/unit/server/auth.test.ts`, `csrf.test.ts`, `authorization.test.ts`, and `session.test.ts` and were NOT duplicated. The genuinely missing behavior — the refresh lifecycle — is new: `src/server/auth/refresh.ts` (303 lines), a server-only service wired into the repository-discovery and repository-authorization paths.
+
+### Verified GitHub refresh-token contract
+
+Per the official GitHub App documentation (refreshing user access tokens; generating a user access token for a GitHub App), a GitHub App OAuth **user** access token (obtained with `scope=offline_access`) is refreshed with a server-side request:
+
+- **Request:** `POST https://github.com/login/oauth/access_token` with `client_id`, `client_secret`, `grant_type=refresh_token`, `refresh_token`.
+- **Success (200 JSON):** a NEW `access_token`, a NEW `refresh_token` (the previous pair is invalidated by GitHub), `expires_in` (seconds, typically 28800), `refresh_token_expires_in` (seconds; the docs document a fixed value of 15,897,600 = 184 days (approximately six months)), `scope`, `token_type`.
+- **Failure:** HTTP 4xx with an error such as `bad_refresh_token` for a revoked/expired/already-rotated refresh token; the affected refresh token is unrecoverable and the session must require a new authorization.
+
+The service uses the existing validated `GITHUB_APP_CLIENT_ID`/`GITHUB_APP_CLIENT_SECRET` (server-side only) and never transmits or returns credentials to the browser.
+
+### Refresh service (`src/server/auth/refresh.ts`, 303 lines)
+
+`createTokenRefreshService({ storage, authConfig, now, fetchImpl, logger })` returns a `TokenRefreshService` exposing `getValidAccessToken(sessionId): Promise<AccessTokenOutcome>` with the typed union `{ status: 'valid', accessToken } | { status: 'unauthorized' | 'rate_limited' | 'upstream_unavailable' }`.
+
+**Behavior:**
+
+1. Loads the session through the existing `SessionStorage.getSession` (encrypted record, same SQLite table — no schema change, no second table, no process-global credential cache).
+2. If the access token is not expired (and not within the documented safety window — `REFRESH_SAFETY_WINDOW_MS = 60_000`), returns it without any network call.
+3. Otherwise, checks refresh-token expiry LOCALLY first: an expired/missing refresh token invalidates the session (`deleteSession`) and returns `unauthorized` WITHOUT contacting GitHub.
+4. Submits exactly one refresh request (see concurrency below) and validates the complete response: JSON object; `access_token` and `refresh_token` non-empty strings; `expires_in` numeric and positive; `refresh_token_expires_in` numeric and positive (defaulting to the documented 15,897,600 when omitted — GitHub omits it for classic-OAuth-issued tokens but the value is documented and stable).
+5. Persists the rotated pair through the existing `rotateCredentials()` — both tokens re-encrypted with the existing AES-256-GCM scheme, both new expiry timestamps stored.
+6. Returns the new access token to the server-side caller only. Never returned to the browser.
+
+**Failure semantics (fail closed, typed, no retry storms):**
+
+| GitHub / storage outcome | Service outcome | Session state |
+|---|---|---|
+| `bad_refresh_token` / HTTP 401 / HTTP 403 (genuine credential rejection, no rate-limit indication) | `unauthorized` | deleted — revocation is never recoverable, no retry |
+| malformed 200 (missing access token, missing refresh token, zero/non-numeric expiry, non-JSON body) | `unauthorized` | deleted — a half-rotated credential set must not be used |
+| transport failure or 5xx | `upstream_unavailable` | **preserved** — transient GitHub outage must not discard valid credentials |
+| HTTP 429, or HTTP 403 with `X-RateLimit-Remaining: 0` | `rate_limited` | preserved — a rate limit is transient, not a rejection; callers retry per existing rate-limit mapping |
+| session deleted/expired while refresh in flight | `unauthorized` | rotation result discarded (post-rotation re-check) — no token handed out for a dead session |
+| `rotateCredentials` storage failure | `unauthorized` | deleted — fail closed; never trust an unverified rotation |
+| session lookup failure | `unauthorized` | no crash, no credential in the error path |
+
+### Token rotation and encryption behavior
+
+Rotation goes exclusively through `SessionStorage.rotateCredentials()`: the stored record is replaced in place with the new access token, new refresh token, and both new expiry timestamps, re-encrypted with the session encryption key (AES-256-GCM via the existing crypto layer). The original refresh token is overwritten at rest and is never used again (verified by reloading the session from disk after rotation). No plaintext credential is logged; the structured logger only receives stable event names and reason codes.
+
+### Concurrent refresh protection (single-flight)
+
+A per-session in-flight `Map<sessionId, Promise<AccessTokenOutcome>>` serializes refreshes for the same session within the single-process Node server:
+
+- The first caller for an expired session creates the in-flight promise; concurrent callers for the same session **await the same promise** and receive its result.
+- Exactly ONE refresh request reaches GitHub per refresh event (verified with deferred mock responses: two simultaneous callers → one recorded token-endpoint call).
+- On success, ALL callers receive the rotated token; on failure, ALL callers receive the same typed failure and the session is invalidated once.
+- The in-flight record is removed after the promise settles (success or failure); a later call with a still-valid token makes no request; a later call after a failed refresh makes no further GitHub request (the session is already gone).
+- A stale rotation cannot overwrite newer credentials: after `rotateCredentials` the service re-checks the session; if the session no longer exists or is expired, the rotation result is discarded and the caller is unauthorized.
+- Independent sessions never share refresh state (separate Map entries).
+
+**Documented boundary:** this coordination is in-process memory. The current application is a single-process Node server; the design does not claim cross-process or cross-instance safety and intentionally avoids distributed locks, Redis, or background workers.
+
+### Integration points
+
+- **`src/server/auth/routes.ts` — `handleSession`:** when the session exists but BOTH the access token and the refresh token are expired, the session is now invalidated server-side and the endpoint reports `connected: false` — it never reports a usable connection for irrecoverably dead credentials. Otherwise behavior is unchanged (`connected`, non-secret identity, per-session CSRF token).
+- **`src/server/auth/routes.ts` — `GET /api/repositories`:** the token is obtained from the refresh service instead of the raw stored credential. `rate_limited` → `429 RATE_LIMITED`; `upstream_unavailable` → `502 GITHUB_UNAVAILABLE`; any non-`valid` outcome → `401 UNAUTHORIZED`. A definitive GitHub 401 (401 Bad Credentials) on a protected request additionally invalidates the session server-side — a subsequent `GET /api/session` reports disconnected — while repository permission denials (403), rate limits, and upstream outages never invalidate. Pagination, envelope validation, and permission-flag computation are unchanged. When no refresh service is configured (`refresh === null`), the pre-existing behavior (stored token) applies.
+- **`src/server/middleware/repositoryAuth.ts` — content boundary:** after the session gate, the middleware obtains the current access token via the refresh service and builds the session record passed to `authorizeRepository` with the refreshed token. The user-plus-App permission intersection, fresh per-operation checks, selected-repository installation checks, CSRF boundary, and status mapping are all preserved unchanged; no privileged installation token is introduced. A definitive GitHub 401 (401 Bad Credentials) on a protected request invalidates the session at this boundary too — subsequent `GET /api/session` reports disconnected, unrelated sessions remain valid, and 403 permission denials, rate limits, and outages never invalidate.
+- **`src/server/index.ts`:** the service is constructed only when both auth config and session storage are available; `handleSession` is now awaited with an error handler (it became async).
+- **`src/server/auth/index.ts`:** barrel exports for the new service and its types.
+
+Ordinary unauthenticated requests never touch the refresh service.
+
+### Test evidence (`tests/unit/server/token-refresh.test.ts` — 42 tests, 1,336 lines)
+
+All tests are deterministic: temporary SQLite databases, injected clocks, and a mock `fetch` that records every token-endpoint call (with deferred responses for concurrency). No real GitHub credentials exist in the file — all credential-shaped values are obviously fake constants — and NO live GitHub refresh was performed.
+
+**Success (8):** valid access token → no refresh request; expiry just beyond the safety window → no refresh; within the safety window → refresh; expired access token → documented endpoint and parameters on the wire; both credentials rotated with new expiry timestamps persisted and reloaded from storage; `refresh_token_expires_in` default applied when omitted; original refresh token never reused after rotation; still-valid rotated token → no further refresh.
+
+**Failure (18):** missing refresh token → invalidated without contacting GitHub (defense-in-depth guard, exercised via a simulated record since storage rejects empty tokens on write); expired refresh token → invalidated before any request; `bad_refresh_token` → session deleted, no retry; HTTP 401 → session deleted; HTTP 403 (genuine credential rejection, no rate-limit indication) → session deleted; HTTP 403 with `X-RateLimit-Remaining: 0` → `rate_limited`, session preserved; five malformed-200 shapes (missing access token, missing refresh token, zero `expires_in`, non-numeric `expires_in`, non-JSON body) → session deleted; transient transport failure → session preserved (`upstream_unavailable`); transient 5xx → preserved; 429 → `rate_limited`, preserved; session deleted during refresh → unauthorized, rotation discarded; session expired during refresh → unauthorized, rotation discarded; database rotation failure → fail closed (session deleted); session lookup failure → no crash, no leak.
+
+**Concurrency (6):** two concurrent refreshes of the same expired session → exactly ONE GitHub call; both callers get the rotated credential; a failed shared refresh leaves BOTH callers unauthorized and the session gone; a failed refresh cannot leave one caller authorized with stale credentials; independent sessions do not share refresh state; in-flight record removed after success (next valid call: no request) and after failure (no further GitHub requests).
+
+**Log safety (1):** success and rejection paths never log token or secret values.
+
+**Integration (9), real HTTP app over ephemeral ports with full OAuth sign-in:** valid access token → no refresh request at discovery; expired access token → exactly one refresh and the ROTATED token used for the subsequent repository request; session with both tokens expired → disconnected and invalidated; rejected refresh (`bad_refresh_token`) during discovery → 401 and session invalidated; transient refresh failure (503) → 502 and session preserved; unauthenticated `/api/repositories` → 401 with zero token-endpoint calls; no credential values in HTTP error bodies or server logs on a rejected refresh; plus 2 review-correction flow tests — a definitive 401 Bad Credentials on a protected request returns 401 and invalidates the session at BOTH the repository-discovery and the content-authorization boundary (subsequent `GET /api/session` reports disconnected), while an unrelated sibling session remains connected and usable.
+
+### Verification gates
+
+- `npm run lint` — 0 errors.
+- `npm run typecheck` — 0 errors (both `tsconfig.web.json` and `tsconfig.server.json`).
+- Focused suite — 42/42 passing.
+- `npm run test` — **562/562** across 17 files (520 baseline + 42 new; no assertions weakened, no tests removed).
+- `npm run build` — exit 0; `npm run build:server` — exit 0.
+- `npm run test:e2e` — 10/10 Chromium.
+- `npm audit` — 0 vulnerabilities.
+- `openspec validate modernize-gitdatnote-foundation` — valid (2 pre-existing spec-length warnings, unchanged).
+- `git diff --check` — clean.
+
+### Local verification (no credentials configured)
+
+Dev server + Vite launched without GitHub credentials (none available in this environment): `GET /api/health` → `{"status":"ok"}`; unauthenticated `GET /api/session` → `{"connected":false}`; unauthenticated `GET /api/repositories` → 401 `UNAUTHORIZED`; unauthenticated `POST /api/session/logout` (with and without a bogus CSRF header) → 401 (CSRF boundary intact); disconnected UI renders ("Not connected to GitHub" + Connect button); Connect GitHub → exactly one in-app navigation to the safe `auth_unconfigured` error view (no secrets, no stack trace); sample repository preview renders through the safe Markdown pipeline (DOM verified: rendered list/blockquote/paragraph, zero `<script>` elements, no inline event handlers); the built client bundle contains no credential or secret strings; server logs contain only structured events and reason codes — no tokens, secrets, or credential values. Live GitHub refresh was NOT performed; all GitHub-facing refresh behavior is verified against deterministic mocks.
+
+### Known limitations
+
+- Refresh coordination is in-process (single-flight Map). If the server were ever run as multiple processes behind one database, two processes could each submit the same refresh token; the second would receive GitHub's rejection and fail closed (session deleted) — safe but disruptive. The current deployment is single-process.
+- `refresh_token_expires_in` defaults to the documented fixed 15,897,600 s when GitHub omits it; a future GitHub change to that documented value would silently shift the expiry used for local pre-checks (the refresh request itself would still fail safely via GitHub's rejection).
+- A revoked ACCESS token is detected on the next authenticated GitHub call: that call fails with 401 and — since the Task 3.5 review correction — the session is invalidated server-side (subsequent `GET /api/session` reports disconnected) at both repository discovery and the content authorization boundary; 403 permission denials, rate limits, and upstream outages never invalidate. Refresh itself only triggers on local expiry, per the documented contract.
+- Live end-to-end refresh against real GitHub credentials was not exercised (no real App credentials in this environment); behavior is verified against the documented contract with mocks.
+
+### Task boundary (deferred, untouched here)
+
+- No Task 3.6 (connect/disconnect UI) or Task 3.7 (broader security audit) work.
+- No repository content read/write operations, no article publishing, no GitHub App installation management, no scheduled refresh jobs, no user account management.
+- No new dependencies, no distributed lock/Redis/background worker, no SQLite schema change, no OAuth/PKCE/CSRF/cookie/encryption redesign.
+- No commit, push, or archive performed.
+
+### Files changed
+
+Created: `src/server/auth/refresh.ts` (303 lines); `tests/unit/server/token-refresh.test.ts` (1,336 lines, 42 tests).
+Modified: `src/server/auth/routes.ts` (+84/−18: refresh-service integration in `handleSession` and repository discovery; dual-expired invalidation); `src/server/middleware/repositoryAuth.ts` (+30/−2: refreshed token fed into the authorization step); `src/server/index.ts` (+20/−2: service construction, dependency wiring, async `handleSession` handling); `src/server/auth/index.ts` (+7: barrel exports); `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.5 marked complete with evidence); `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
+
+No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `70d3b73`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.

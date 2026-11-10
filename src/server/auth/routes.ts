@@ -23,6 +23,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { clearPendingAuthCookie, issuePendingAuthCookie, parsePendingAuthCookie } from './cookies.js';
 import { GITHUB_AUTHORIZATION_URL, GITHUB_APP_SCOPE } from './config.js';
 import { exchangeUserToken, fetchUserProfile, listAccessibleRepositories } from './github.js';
+import type { TokenRefreshService } from './refresh.js';
 import {
   clearSessionCookie,
   issueSessionCookie,
@@ -52,6 +53,12 @@ export interface AuthRouteDeps {
   /** `null` when session storage is unavailable. */
   readonly stateStore: PendingStateStore | null;
   readonly session: { storage: SessionStorage; config: SessionConfig } | null;
+  /**
+   * Task 3.5 token refresh service. `null` when auth configuration or
+   * session storage is unavailable; authenticated GitHub routes then treat
+   * the stored access token as the only credential (no refresh possible).
+   */
+  readonly refresh: TokenRefreshService | null;
   /** `true` when cookies must carry `Secure` (production/HTTPS). */
   readonly cookieSecure: boolean;
 }
@@ -305,12 +312,18 @@ function fail(res: ServerResponse, deps: AuthRouteDeps, err: unknown, event: str
  * sessions it returns only `connected`, the non-secret identity fields, and
  * the per-session CSRF token. Tokens, refresh tokens, session ids, and
  * internal database information are never returned.
+ *
+ * Task 3.5: when a session's stored access token AND refresh token are both
+ * expired, the GitHub connection is irrecoverably expired. The session is
+ * invalidated server-side so this endpoint never reports a usable
+ * connection for dead credentials (it mirrors what the next authenticated
+ * GitHub call would produce).
  */
-export function handleSession(
-  _req: IncomingMessage,
+export async function handleSession(
+  req: IncomingMessage,
   res: ServerResponse,
   deps: AuthRouteDeps,
-): void {
+): Promise<void> {
   const body: {
     connected: boolean;
     user?: { login: string; name: string; avatarUrl: string };
@@ -319,18 +332,32 @@ export function handleSession(
 
   const session = deps.session;
   if (session !== null) {
-    const sessionId = parseSessionCookie(_req.headers.cookie);
+    const sessionId = parseSessionCookie(req.headers.cookie);
     if (sessionId !== null) {
       try {
         const result = session.storage.getSession(sessionId);
         if (result.status === 'found') {
-          body.connected = true;
-          body.user = {
-            login: result.session.user.login,
-            name: result.session.user.name,
-            avatarUrl: result.session.user.avatarUrl,
-          };
-          body.csrfToken = result.session.csrfToken;
+          const nowMs = deps.now();
+          const credentials = result.session.credentials;
+          if (
+            credentials.tokenExpiresAt <= nowMs &&
+            credentials.refreshExpiresAt <= nowMs
+          ) {
+            // Both credentials are expired: the session cannot be recovered
+            // (a refresh would be rejected by GitHub). Invalidate it so the
+            // frontend reconnects through the normal authorization flow.
+            session.storage.deleteSession(sessionId);
+            deps.logger.warn({ event: 'session_irrecoverably_expired' });
+            body.connected = false;
+          } else {
+            body.connected = true;
+            body.user = {
+              login: result.session.user.login,
+              name: result.session.user.name,
+              avatarUrl: result.session.user.avatarUrl,
+            };
+            body.csrfToken = result.session.csrfToken;
+          }
         }
         // Expired and missing sessions behave as unauthenticated.
       } catch (err) {
@@ -385,6 +412,12 @@ export function handleLogout(
  * the user's own access token (never an application-wide privileged token)
  * with the two-step installations flow. `canRead`/`canWrite` are truthful
  * per-repository permissions; the fixed default content root is preserved.
+ *
+ * Task 3.5: the access token used for the GitHub call comes from the token
+ * refresh service, which transparently refreshes (rotating both
+ * credentials) when the stored access token has expired. Refresh failures
+ * map to 401 (unrecoverable), 429 (rate limited), or 502 (transient
+ * upstream failure) without leaking credential values.
  */
 export async function handleRepositories(
   _req: IncomingMessage,
@@ -414,10 +447,37 @@ export async function handleRepositories(
       return;
     }
 
+    // Task 3.5: obtain a currently valid user access token. This refreshes
+    // (and rotates both credentials) when the stored access token has
+    // expired, per the documented GitHub App user-token refresh flow.
+    let accessToken: string;
+    if (deps.refresh === null) {
+      // No refresh capability (auth/session unconfigured): the stored token
+      // is the only credential; the existing 401/429/502 mapping below still
+      // applies when GitHub rejects it.
+      accessToken = result.session.credentials.accessToken;
+    } else {
+      const token = await deps.refresh.getValidAccessToken(result.session.sessionId);
+      if (token.status === 'rate_limited') {
+        sendJson(res, 429, errorDetail('RATE_LIMITED'));
+        return;
+      }
+      if (token.status === 'upstream_unavailable') {
+        sendJson(res, 502, errorDetail('GITHUB_UNAVAILABLE'));
+        return;
+      }
+      if (token.status !== 'valid') {
+        // Session missing, expired, or credentials irrecoverably invalid.
+        sendJson(res, 401, errorDetail('UNAUTHORIZED'));
+        return;
+      }
+      accessToken = token.accessToken;
+    }
+
     let repos;
     try {
       repos = await listAccessibleRepositories(
-        result.session.credentials.accessToken,
+        accessToken,
         deps.fetchImpl,
       );
     } catch (err) {
@@ -427,6 +487,12 @@ export async function handleRepositories(
       });
       if (err instanceof AuthError) {
         if (err.code === 'UNAUTHORIZED') {
+          // A definitive GitHub 401 against the user's stored credentials
+          // proves they are invalid or revoked: invalidate the session so
+          // /api/session reports disconnected. Permission denials (403)
+          // and rate limits must NOT invalidate.
+          deps.session.storage.deleteSession(sessionId);
+          deps.logger.warn({ event: 'session_invalidated', reason: 'github_401' });
           sendJson(res, 401, errorDetail('UNAUTHORIZED'));
           return;
         }

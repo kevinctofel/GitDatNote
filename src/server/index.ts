@@ -64,6 +64,7 @@ import {
   resolveAuthConfig,
   type AuthRouteDeps,
 } from './auth/index.js';
+import { createTokenRefreshService } from './auth/refresh.js';
 import type { PendingStateStore } from './auth/index.js';
 import { openPendingStateStore } from './auth/state.js';
 import {
@@ -132,6 +133,20 @@ export function createApp(options: AppOptions = {}): Server {
     logger.warn({ event: 'auth_not_configured', reason: authResult.reason });
   }
 
+  // Task 3.5: token refresh service. Both auth configuration and session
+  // storage must be available; otherwise authenticated routes fall back to
+  // the stored token without refresh capability (existing error mapping).
+  const refresh =
+    authConfig !== null && session !== null
+      ? createTokenRefreshService({
+          storage: session.storage,
+          authConfig,
+          now,
+          fetchImpl,
+          logger,
+        })
+      : null;
+
   const authDeps: AuthRouteDeps = {
     logger,
     now,
@@ -139,6 +154,7 @@ export function createApp(options: AppOptions = {}): Server {
     authConfig,
     stateStore,
     session,
+    refresh,
     cookieSecure,
   };
 
@@ -268,7 +284,9 @@ export function createApp(options: AppOptions = {}): Server {
         return;
       }
       if (pathname === '/api/session' && req.method === 'GET') {
-        handleSession(req, res, authDeps);
+        void handleSession(req, res, authDeps).catch((err: unknown) => {
+          sendUnexpectedError(res, logger, err);
+        });
         return;
       }
       if (pathname === '/api/repositories' && req.method === 'GET') {

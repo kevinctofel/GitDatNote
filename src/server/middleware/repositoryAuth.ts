@@ -108,10 +108,36 @@ export async function enforceContentBoundary(
   }
   const session = lookup.session;
 
-  // 2) Fresh repository authorization (never a cached discovery result).
+  // 2) Task 3.5: obtain a currently valid user access token. This refreshes
+  //    (rotating both credentials) when the stored access token has expired.
+  //    Transient upstream failures map to 429/502; unrecoverable credential
+  //    failures (and deleted/expired sessions) map to 401, so a request
+  //    never proceeds with a dead or stale token.
+  let sessionForAuthorization = session;
+  if (deps.refresh !== null) {
+    const token = await deps.refresh.getValidAccessToken(session.sessionId);
+    if (token.status === 'rate_limited') {
+      sendJsonError(res, errorDetail('RATE_LIMITED'));
+      return false;
+    }
+    if (token.status === 'upstream_unavailable') {
+      sendJsonError(res, errorDetail('GITHUB_UNAVAILABLE'));
+      return false;
+    }
+    if (token.status !== 'valid') {
+      sendJsonError(res, errorDetail('UNAUTHORIZED'));
+      return false;
+    }
+    sessionForAuthorization = {
+      ...session,
+      credentials: { ...session.credentials, accessToken: token.accessToken },
+    };
+  }
+
+  // 3) Fresh repository authorization (never a cached discovery result).
   try {
     const authorization = await authorizeRepository(
-      session,
+      sessionForAuthorization,
       ref.owner,
       ref.repo,
       requiredAccess,
@@ -120,6 +146,12 @@ export async function enforceContentBoundary(
     if (authorization.status !== 'authorized') {
       // `denied` (403) and `unauthorized` (401) are distinct outcomes.
       if (authorization.status === 'unauthorized') {
+        // A definitive GitHub 401 against the user's stored credentials
+        // proves they are invalid or revoked: invalidate the session (same
+        // behavior as repository discovery). Permission denials (403) and
+        // rate limits must NOT invalidate.
+        deps.session.storage.deleteSession(session.sessionId);
+        deps.logger.warn({ event: 'session_invalidated', reason: 'github_401' });
         sendJsonError(res, errorDetail('UNAUTHORIZED'));
         return false;
       }
@@ -132,6 +164,10 @@ export async function enforceContentBoundary(
     if (err instanceof AuthError) {
       logger.warn({ event: 'content_boundary_upstream_error', code: err.code });
       if (err.code === 'UNAUTHORIZED') {
+        // A definitive GitHub 401 against the user's stored credentials
+        // proves they are invalid or revoked: invalidate the session.
+        deps.session.storage.deleteSession(session.sessionId);
+        deps.logger.warn({ event: 'session_invalidated', reason: 'github_401' });
         sendJsonError(res, errorDetail('UNAUTHORIZED'));
         return false;
       }
