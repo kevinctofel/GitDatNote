@@ -24,7 +24,12 @@ export function DisconnectedView({ client }: DisconnectedViewProps) {
       <h1 id="disconnected-heading">Not connected to GitHub</h1>
       <p>
         GitDatNote reads and writes your notes through GitHub. You are not
-        signed in.
+        signed in yet.
+      </p>
+      <p>
+        Connecting lets you approve GitDatNote&apos;s access to the
+        repositories you permit — no personal access tokens to create or
+        paste. You can disconnect at any time.
       </p>
       <button type="button" onClick={handleConnect}>
         Connect GitHub

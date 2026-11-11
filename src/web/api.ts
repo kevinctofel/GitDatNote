@@ -1,11 +1,15 @@
 import {
+  errorDetail,
+  ERROR_CODES,
   mapGithubHttpError,
   mapGithubNetworkError,
 } from "../shared/errors";
 import type {
   ContentResult,
   ErrorDetail,
+  ErrorDomain,
   ErrorResponse,
+  ErrorStatus,
   Repository,
 } from "../shared/types";
 import type { SessionState } from "./types";
@@ -56,9 +60,15 @@ const MALFORMED_RESPONSE: ErrorDetail = {
 };
 
 /**
- * Thin, typed API client. It talks to the (not-yet-implemented) backend
- * endpoints and maps every failure onto the shared error contract so the UI
- * can distinguish retryable from non-retryable failures.
+ * Session-bound CSRF token shape — the exact format the server issues and
+ * validates (foundation task 3.4: 32 random bytes, hex-encoded).
+ */
+const CSRF_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+
+/**
+ * Thin, typed API client (foundation tasks 3.2/3.4/3.6). It talks to the
+ * backend endpoints and maps every failure onto the shared error contract so
+ * the UI can distinguish retryable from non-retryable failures.
  *
  * It never fakes success: a 404 (endpoint absent) or 401 (no session) on the
  * session probe reports "not connected", not a live connection. Successful
@@ -75,6 +85,13 @@ export class ApiClient {
     this.fetchImpl = fetchImpl;
   }
 
+  /**
+   * Probe the current session (foundation task 3.2). A connected session
+   * carries the session-specific `csrfToken` (foundation task 3.4), which is
+   * the only token `disconnectGithub` accepts. A connected session without
+   * a usable token is still valid for reading: the UI renders the connected
+   * state but does not offer an unprotected disconnect.
+   */
   async getSession(): Promise<SessionOutcome> {
     try {
       const state = await this.request<SessionState>(
@@ -85,7 +102,7 @@ export class ApiClient {
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.detail.status === 401 || err.detail.status === 404) {
-          return { state: { connected: false } };
+          return { state: { connected: false } }
         }
         return { state: { connected: false }, error: err.detail };
       }
@@ -118,6 +135,39 @@ export class ApiClient {
    */
   connectGithub(): void {
     window.location.assign("/api/auth/github/start");
+  }
+
+  /**
+   * End the current GitHub session (foundation task 3.6) via
+   * `POST /api/auth/logout`.
+   *
+   * The HttpOnly session cookie travels with the same-origin request
+   * automatically. The session-specific CSRF token (returned by
+   * `GET /api/session`) is sent exclusively in the `X-CSRF-Token` header —
+   * never in the query string, request body, or cookie — and is never
+   * logged, rendered, or persisted. This is the only CSRF mechanism.
+   *
+   * A missing or malformed token rejects before any network request is
+   * made, so a connected session without a usable token can never issue an
+   * unprotected logout. HTTP 204 with no body is success; every other
+   * outcome maps to the shared `ApiError`/`ErrorDetail` contract.
+   */
+  async disconnectGithub(csrfToken: string): Promise<void> {
+    if (!CSRF_TOKEN_PATTERN.test(csrfToken)) {
+      throw new ApiError(errorDetail("CSRF_INVALID"));
+    }
+    let res: Response;
+    try {
+      res = await this.fetchImpl("/api/auth/logout", {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+      });
+    } catch {
+      // Transport failure (no response at all) — a retryable connection error.
+      throw new ApiError(mapGithubNetworkError());
+    }
+    if (res.status === 204) return;
+    throw new ApiError(await errorDetailFromResponse(res));
   }
 
   private async request<T>(
@@ -162,13 +212,29 @@ export class ApiClient {
 }
 
 /**
- * Extract the shared `ErrorDetail` from an error response. Prefers a well-formed
- * `{ error: {...} }` body; otherwise maps the HTTP status conservatively.
+ * Extract the shared `ErrorDetail` from an error response.
+ *
+ * Accepts both wire shapes the server emits: the standard
+ * `{ "error": ErrorDetail }` envelope (content-operation routes) and the
+ * bare `ErrorDetail` body (auth routes and the centralized CSRF boundary,
+ * which share `sendJson`). For a bare body, `status` mirrors the actual
+ * HTTP status unless the body carries a valid one. Anything else maps the
+ * HTTP status conservatively.
  */
 async function errorDetailFromResponse(res: Response): Promise<ErrorDetail> {
   try {
     const body = (await res.json()) as unknown;
     if (isErrorResponse(body)) return body.error;
+    if (isBareErrorDetail(body)) {
+      return {
+        code: body.code as ErrorDomain,
+        message: body.message,
+        retryable: body.retryable,
+        status: isErrorStatus(body.status)
+          ? body.status
+          : mapGithubHttpError(res.status).status,
+      };
+    }
   } catch {
     /* non-JSON body: fall through to status-based mapping */
   }
@@ -185,5 +251,38 @@ function isErrorResponse(value: unknown): value is ErrorResponse {
     typeof detail.message === "string" &&
     typeof detail.retryable === "boolean" &&
     typeof detail.status === "number"
+  );
+}
+
+/**
+ * A bare (unwrapped) error body: a structurally valid `ErrorDetail` whose
+ * `code` is a known shared domain — the shape the auth routes and the CSRF
+ * boundary send via their shared `sendJson` helper.
+ */
+type BareErrorDetail = {
+  code: string;
+  message: string;
+  retryable: boolean;
+  status?: number;
+};
+
+function isBareErrorDetail(value: unknown): value is BareErrorDetail {
+  if (typeof value !== "object" || value === null || "error" in value) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.code === "string" &&
+    v.code in ERROR_CODES &&
+    typeof v.message === "string" &&
+    typeof v.retryable === "boolean" &&
+    (v.status === undefined || typeof v.status === "number")
+  );
+}
+
+function isErrorStatus(value: number | undefined): value is ErrorStatus {
+  return (
+    typeof value === "number" &&
+    [400, 401, 403, 404, 409, 422, 429, 500, 502].includes(value)
   );
 }

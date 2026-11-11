@@ -2,13 +2,14 @@ import { z } from "zod";
 
 /**
  * Runtime validation schemas for successful (2xx) JSON responses from the
- * (placeholder) backend.
+ * backend.
  *
- * The backend endpoints are not implemented yet, so these schemas guard the
- * frontend against malformed or partially-implemented responses and turn them
- * into safe, understandable errors instead of rendering crashes. They mirror
- * the shared domain shapes in `src/shared/types.ts` (the web `SessionState`,
- * the shared `Repository`, and the shared `ContentResult`).
+ * The backend endpoints (`GET /api/session`, `GET /api/repositories`,
+ * `POST /api/auth/logout`, …) are implemented, but these schemas still guard
+ * the frontend against malformed responses and turn them into safe,
+ * understandable errors instead of rendering crashes. They mirror the shared
+ * domain shapes in `src/shared/types.ts` (the web `SessionState`, the shared
+ * `Repository`, and the shared `ContentResult`).
  */
 
 const sessionUserSchema = z.object({

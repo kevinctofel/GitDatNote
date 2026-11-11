@@ -11,18 +11,19 @@ interface AppProps {
 }
 
 /**
- * Minimal, accessible application shell for foundation task 2.5.
+ * Minimal, accessible application shell (foundation tasks 2.5/3.2/3.6).
  *
- * It probes the (not-yet-implemented) `GET /api/session` endpoint to decide
- * between connected / disconnected / error. Since the backend session and
- * authentication APIs do not exist yet, the running app lands in the
- * disconnected state; a clearly-labeled "Preview the connected layout
- * (sample data)" affordance lets a reviewer see the connected layout without
- * implying a live connection.
+ * It probes `GET /api/session` to decide between connected / disconnected /
+ * error. A valid session renders the connected user's identity with a
+ * Disconnect action (task 3.6); a missing or expired session lands in the
+ * disconnected state with the Connect GitHub action. A clearly-labeled
+ * "Preview the connected layout (sample data)" affordance lets a reviewer
+ * see the connected layout without implying a live connection.
  *
  * Session loading is guarded by a request-generation counter so that stale
  * responses (out-of-order retries, or a response that lands after the
- * component unmounts) cannot overwrite the current connection state.
+ * component unmounts) cannot overwrite the current connection state —
+ * including after a successful disconnect.
  */
 export function App({ client: clientProp }: AppProps = {}) {
   const defaultClient = useMemo(() => new ApiClient(), []);
@@ -68,6 +69,17 @@ export function App({ client: clientProp }: AppProps = {}) {
         });
       });
   }, [client]);
+
+  /**
+   * Task 3.6: called by ConnectedView when the connection is definitively
+   * gone (a confirmed logout, or a definitive 401/404). Invalidates any
+   * in-flight session or repository responses and transitions to the
+   * disconnected view.
+   */
+  const handleDisconnected = useCallback(() => {
+    generationRef.current += 1;
+    setConnection({ status: "disconnected" });
+  }, []);
 
   useEffect(() => {
     loadConnection();
@@ -148,8 +160,16 @@ export function App({ client: clientProp }: AppProps = {}) {
           </>
         )}
 
-        {connection.status === "connected" && (
-          <ConnectedView client={client} />
+        {connection.status === "connected" && connection.session && (
+          <ConnectedView
+            client={client}
+            session={connection.session}
+            onDisconnected={handleDisconnected}
+            // Recovery for a CSRF-rejected logout: re-probe the session so a
+            // still-valid session can supply its stored (possibly fresh) CSRF
+            // token; a gone session reconciles to the disconnected view.
+            onRecheckSession={loadConnection}
+          />
         )}
       </main>
     </div>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError } from "../api";
 import type { ApiClient } from "../api";
 import type { ErrorDetail, Repository } from "../../shared/types";
+import type { SessionState, SessionUser } from "../types";
 import { FIXTURE_REPOSITORIES } from "../fixtures";
 import { getPreviewMarkdown } from "../preview-overrides";
 import { MarkdownPreview } from "./MarkdownPreview";
@@ -22,28 +23,225 @@ function toDetail(err: unknown): ErrorDetail {
   };
 }
 
-interface ConnectedViewProps {
-  client: ApiClient;
-  /**
-   * When true, this view renders sample data with an explicit preview banner
-   * instead of fetching from the (not-yet-implemented) backend. It is used to
-   * demonstrate the connected-state layout; it is never a live connection.
-   */
-  preview?: boolean;
+/**
+ * The only avatar source the UI will render: an https URL on GitHub's own
+ * avatar host. Anything else (protocol-relative, javascript:, other
+ * origins) is omitted rather than displayed.
+ */
+function safeAvatarUrl(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== "avatars.githubusercontent.com"
+    ) {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Connected-state layout: a repository selector plus a content area with
- * explicit loading, empty, and error states. In foundation task 2.5 the
- * content service is not implemented, so repository content reading is a
- * labeled placeholder; the safe Markdown renderer is demonstrated with
- * sample content in preview mode.
+ * A definitive session-invalid outcome: the server confirmed the logout
+ * (handled separately) or definitively reported the session as gone.
  *
- * Repository loading is guarded by a request-generation counter so that stale
- * responses (out-of-order retries, or a response that lands after the
- * component unmounts) cannot overwrite the current list state.
+ * The shared error code is preferred over the HTTP status alone:
+ * `UNAUTHORIZED` is the session-gone code, and a bare 404 likewise means
+ * the endpoint no longer knows this session. A 403 `CSRF_INVALID` is
+ * NOT a session loss — the centralized CSRF boundary rejects the request
+ * without deleting the session — so it must not reconcile to the
+ * disconnected state.
  */
-export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
+function isSessionLost(detail: ErrorDetail): boolean {
+  if (detail.code === "UNAUTHORIZED") return true;
+  return detail.status === 401 || detail.status === 404;
+}
+
+type LogoutState =
+  | { status: "idle" }
+  | { status: "pending" }
+  | { status: "failed"; detail: ErrorDetail };
+
+/**
+ * Connected-identity block (task 3.6): the user's GitHub login (and name),
+ * a safe avatar when one is supplied, a "connected" status line, and the
+ * Disconnect action.
+ *
+ * Disconnect semantics:
+ * - a synchronous in-flight guard prevents duplicate logout requests;
+ * - the pending state is announced via `role="status"`;
+ * - success or a definitive 401 UNAUTHORIZED/404 reconciles to the
+ *   disconnected view through `onDisconnected` exactly once;
+ * - a 403 `CSRF_INVALID` is NOT a successful logout: the CSRF boundary
+ *   rejected the request without deleting the session. The view stays
+ *   connected, explains the failure safely, and offers a session
+ *   recheck (which fetches the stored, possibly fresh, CSRF token)
+ *   instead of resending the rejected token. Other 403 errors likewise
+ *   do not imply session invalidation and keep the plain retry;
+ * - any other failure (429, 5xx, network) shows a recoverable
+ *   `role="alert"` message and leaves the button available to retry — the
+ *   UI never claims a disconnect that the server did not confirm.
+ * - a connected session without a usable CSRF token offers no disconnect
+ *   control at all (no unprotected logout is ever issued).
+ */
+function ConnectedIdentity({
+  user,
+  csrfToken,
+  client,
+  onDisconnected,
+  onRecheckSession,
+}: {
+  user: SessionUser;
+  csrfToken?: string;
+  client: ApiClient;
+  onDisconnected?: () => void;
+  /**
+   * Recheck the session after a logout was rejected by the CSRF boundary:
+   * the server-side session may still be valid and the probe returns the
+   * stored (possibly fresh) CSRF token.
+   */
+  onRecheckSession?: () => void;
+}) {
+  const [logout, setLogout] = useState<LogoutState>({ status: "idle" });
+  const inFlightRef = useRef(false);
+  const avatar = safeAvatarUrl(user.avatarUrl);
+
+  const handleDisconnect = useCallback(async () => {
+    if (inFlightRef.current) return; // no duplicate logout requests
+    if (csrfToken === undefined || csrfToken.length === 0) return;
+    inFlightRef.current = true;
+    setLogout({ status: "pending" });
+    try {
+      await client.disconnectGithub(csrfToken);
+      onDisconnected?.();
+    } catch (err) {
+      const detail = toDetail(err);
+      if (isSessionLost(detail)) {
+        // The server says the session is already gone: reconcile directly
+        // instead of reporting a failed disconnect.
+        onDisconnected?.();
+      } else {
+        setLogout({ status: "failed", detail });
+      }
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, [client, csrfToken, onDisconnected]);
+
+  return (
+    <div className="session-identity">
+      {avatar !== null && (
+        <img className="avatar" src={avatar} alt={`Avatar of ${user.login}`} />
+      )}
+      <div>
+        <p className="identity-login">
+          {user.name ? `${user.name} (${user.login})` : user.login}
+        </p>
+        <p className="identity-status">Connected to GitHub</p>
+      </div>
+      {csrfToken !== undefined && csrfToken.length > 0 ? (
+        <div className="identity-actions">
+          {logout.status === "pending" && (
+            <span className="logout-status" role="status">
+              Disconnecting…
+            </span>
+          )}
+          {logout.status === "failed" && (
+            <span className="logout-error" role="alert">
+              Couldn&apos;t disconnect: {logout.detail.message}
+            </span>
+          )}
+          {logout.status === "failed" &&
+          logout.detail.code === "CSRF_INVALID" ? (
+            /* The CSRF boundary rejected the request; the server-side
+               session may still be valid. Do not resend the rejected
+               token: recheck the session to obtain the stored (possibly
+               fresh) CSRF token. */
+            <>
+              <p className="logout-recovery-note">
+                Your GitHub connection is still active.
+              </p>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => onRecheckSession?.()}
+              >
+                Recheck session
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={logout.status === "pending"}
+              onClick={() => void handleDisconnect()}
+            >
+              {logout.status === "pending" ? "Disconnecting…" : "Disconnect"}
+            </button>
+          )}
+        </div>
+      ) : (
+        // A connected session without a usable CSRF token cannot be
+        // disconnected safely — offer no unprotected logout action.
+        <p className="identity-note">
+          Sign-out is unavailable for this session.
+        </p>
+      )}
+    </div>
+  );
+}
+
+interface ConnectedViewProps {
+  client: ApiClient;
+  /**
+   * The current session (tasks 3.2/3.4). When present — and not in preview
+   * mode — renders the connected user's identity and the Disconnect
+   * control. Preview mode never receives a session.
+   */
+  session?: SessionState;
+  /**
+   * When true, this view renders sample data with an explicit preview
+   * banner instead of fetching from the backend. It is used to
+   * demonstrate the connected-state layout; it is never a live connection.
+   */
+  preview?: boolean;
+  /**
+   * Called exactly once when the connection is definitively gone: a
+   * confirmed logout (204), or a definitive 401/404 from logout or
+   * repository discovery. The parent transitions to the disconnected view.
+   */
+  onDisconnected?: () => void;
+  /**
+   * Recheck the session (`GET /api/session`) after a logout is rejected by
+   * the CSRF boundary: the server-side session may still be valid and the
+   * probe returns the stored (possibly fresh) CSRF token.
+   */
+  onRecheckSession?: () => void;
+}
+
+/**
+ * Connected-state layout: the connected user's identity with a Disconnect
+ * action (task 3.6), a repository selector, and a content area with
+ * explicit loading, empty, and error states. The backend content API
+ * exists (task 3.4); UI content display is a later foundation task, so in
+ * non-preview mode the content area shows a labeled placeholder. In
+ * preview mode the safe Markdown renderer is demonstrated with sample
+ * content.
+ *
+ * Repository loading is guarded by a request-generation counter so that
+ * stale responses (out-of-order retries, or a response that lands after
+ * the component unmounts) cannot overwrite the current list state.
+ */
+export function ConnectedView({
+  client,
+  session,
+  preview = false,
+  onDisconnected,
+  onRecheckSession,
+}: ConnectedViewProps) {
   const [repos, setRepos] = useState<RepoListState>({ status: "loading" });
   const [selected, setSelected] = useState<Repository | null>(null);
 
@@ -68,9 +266,17 @@ export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
       })
       .catch((err) => {
         if (generation !== generationRef.current) return;
-        setRepos({ status: "error", detail: toDetail(err) });
+        const detail = toDetail(err);
+        // A definitive session-invalid response reconciles to the
+        // disconnected state instead of showing a repository error.
+        if (isSessionLost(detail)) {
+          generationRef.current += 1; // drop any further stale responses
+          onDisconnected?.();
+          return;
+        }
+        setRepos({ status: "error", detail });
       });
-  }, [client, preview]);
+  }, [client, preview, onDisconnected]);
 
   useEffect(() => {
     loadRepos();
@@ -111,6 +317,16 @@ export function ConnectedView({ client, preview = false }: ConnectedViewProps) {
           <strong>Preview — sample data only.</strong> This is not a live
           GitHub connection.
         </p>
+      )}
+
+      {!preview && session?.connected && (
+        <ConnectedIdentity
+          user={session.user}
+          csrfToken={session.csrfToken}
+          client={client}
+          onDisconnected={onDisconnected}
+          onRecheckSession={onRecheckSession}
+        />
       )}
 
       <RepositorySelector

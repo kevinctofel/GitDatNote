@@ -1147,3 +1147,121 @@ Created: `src/server/auth/refresh.ts` (303 lines); `tests/unit/server/token-refr
 Modified: `src/server/auth/routes.ts` (+84/−18: refresh-service integration in `handleSession` and repository discovery; dual-expired invalidation); `src/server/middleware/repositoryAuth.ts` (+30/−2: refreshed token fed into the authorization step); `src/server/index.ts` (+20/−2: service construction, dependency wiring, async `handleSession` handling); `src/server/auth/index.ts` (+7: barrel exports); `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.5 marked complete with evidence); `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
 
 No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `70d3b73`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.
+
+## Task 3.6 — GitHub connection and disconnection UI
+
+### Summary
+
+Task 3.6 turns the existing authentication infrastructure into a coherent, accessible connect/disconnect experience: a working Disconnect action, correct authenticated-session transitions, and complete, understandable error states. All of it is built on top of the accepted Task 3.5 baseline (`95d54e5`) without touching server-side security behavior, content operations, or any Task 3.7/Phase 4 work.
+
+### Existing functionality reused (not rewritten)
+
+- Connect GitHub button performing exactly one top-level navigation to `GET /api/auth/github/start` (verified live: the button click produces a single navigation; the server 302s to the safe `auth_unconfigured` error view when App credentials are absent).
+- Session probing via `GET /api/session` and the connected/disconnected/error state machine in `App.tsx`.
+- The accessible `<select>` repository selector with its existing label, keyboard operation, and `canRead`/`canWrite` labels (read-only repositories remain selectable but clearly labeled).
+- Empty, loading, and retryable repository error states (Retry preserved for retryable failures).
+- The safe `/error?reason=...` page with fixed messages that never reflects unknown query values.
+- The sample-data preview, still explicitly labeled ("Preview — sample data only. This is not a live GitHub connection.") and independent of real authentication.
+- The existing `ApiError`/`ErrorDetail` mapping contract and the shared `src/shared/errors.ts` helpers.
+
+### New behavior: the Disconnect action
+
+- `ApiClient.disconnectGithub(csrfToken)` in `src/web/api.ts` (typed, part of the API client — nothing bypasses it): `POST /api/auth/logout`; the CSRF token is sent **exclusively** in the `X-CSRF-Token` header (never in the query string, request body, or cookie; no second CSRF mechanism); the session cookie rides along through same-origin request behavior; HTTP 204 with no body is success; non-success responses are mapped into the existing `ApiError`/`ErrorDetail` contract (bare `ErrorDetail` bodies from the CSRF boundary are handled, not just envelopes); network failures map to a `NETWORK` detail. The token is never logged, displayed, or persisted.
+- **Malformed/incomplete session rule:** a connected session without a usable CSRF token must not issue an unprotected logout. `disconnectGithub(undefined)` throws a `BAD_REQUEST` `ApiError` before any network request, and the UI simply offers no Disconnect action for such a session (with a fixed explanatory note) instead of manufacturing a token.
+- `src/web/types.ts` adds `SessionUser` (`login`, optional `name`/`avatarUrl`) and `SessionState` (`connected`, `user`, optional `csrfToken`) plus a state-machine docstring; stale comments describing backend APIs as unimplemented were updated where they now exist.
+
+### Connection and logout state transitions
+
+- Connected view (`ConnectedView.tsx`) renders the user's GitHub login, display name (when supplied), an avatar gated by `safeAvatarUrl` (https-only on the GitHub avatar host; anything else is dropped, and no `onerror`/`onload` handlers are ever emitted), a clear "Connected to GitHub" status, the repository selector, and a Disconnect button.
+- Disconnect interaction: the button enters an accessible pending/disabled state (no duplicate requests — a second click while pending is ignored); on success `App.handleDisconnected` clears the identity, the selected repository, and the repository list, and transitions to the disconnected view **without a page reload**.
+- **Stale-response protection:** a generation ref is incremented on disconnect; in-flight repository and session responses that resolve afterward are discarded, so late responses cannot restore the old connected UI (test: late repository response cannot resurrect connected content).
+- **Definitive session loss:** a `401 UNAUTHORIZED` on logout (or a bare 404) means the session is no longer valid server-side; the frontend reconciles into the disconnected state rather than showing a failure. `detail.code` is preferred over the HTTP status alone (`UNAUTHORIZED` is the shared session-gone code).
+- **CSRF rejection is NOT a logout:** a `403 CSRF_INVALID` is returned by the centralized CSRF boundary (`src/server/middleware/csrf.ts`) when the token is missing, malformed, or does not match the session. That response does **not** delete the server-side session, so it must not transition the UI to disconnected and must not be shown as "Disconnected" while the server may still hold a valid session. Instead the view stays connected, shows a safe fixed explanation ("Your GitHub connection is still active."), and offers a **Recheck session** action: it re-probes `GET /api/session`, which returns the stored (possibly fresh) CSRF token, and a subsequent logout uses that token. The rejected token is never resent — there is no plain "Disconnect" retry in the CSRF-failure state. Other 403 errors likewise do not imply session invalidation and keep the plain retry.
+- **Failed logout** (other errors: 429, 5xx, network): a safe, fixed message in `role="alert"` with retry; the UI never claims the server session was deleted and never shows a misleading success state.
+
+### Error and recovery handling
+
+No new error-management framework. The existing distinct OAuth reasons (not configured, denied, invalid/expired/used state, token-exchange failure, profile failure), the safe error page, the session-expiry reconnection path, and retryable repository errors (429 and 5xx keep their distinct messaging and Retry — never presented as credential revocation) are preserved and verified by tests. The logout failure path adds one safe fixed message distinct from all of them.
+
+### Accessibility
+
+- Semantic `<button>` elements with clear labels; visible 2px keyboard focus outline (verified live with a real Tab keypress).
+- `role="status"`/`aria-live="polite"` for pending/success transitions; `role="alert"` for actionable failures.
+- Disabled/pending controls expressed via `disabled` + label text, never color-only.
+- Readable contrast in light and dark schemes (dark verified live: `rgb(20,20,20)` background / `rgb(242,242,242)` text); responsive without horizontal overflow at 390 px and 1280 px.
+
+### Tests added (25 new; deterministic, no live GitHub credentials)
+
+- `tests/web/api.test.ts` (+10): logout calls `POST /api/auth/logout` with the token only in `X-CSRF-Token` (fetch called exactly once; no query/body/cookie token); 204 empty-body succeeds; missing CSRF fails safely **before any network request**; 401/403/429/500/502 and network failures map into the `ApiError` contract without leaking raw error text; a connected session without a CSRF token still renders connected (`state.connected === true`, no error).
+- `tests/web/components.test.tsx` (+15): App-level flow via a dependency-injected client — initial loading state; disconnected view; successful connected session with user identity (login, name, avatar; non-https and cross-origin avatar URLs are dropped and no `onerror`/`onload` attributes appear); connected user with repository `<select>` selection; successful logout clears identity, selection, and repository list (exactly one request); double-click disconnect sends only one request; pending logout is communicated accessibly; **logout 401 transitions to the disconnected state; logout 403 `CSRF_INVALID` does NOT transition to disconnected (identity remains, no "Disconnected" claim, the rejected token is never resent, and a session-recheck recovery action is offered); after a CSRF rejection, rechecking the session yields a fresh token and a subsequent logout succeeds with it; after a CSRF rejection, rechecking a gone session reconciles to the disconnected view (rejected token never resent); a late repository response cannot restore stale connected content; the sample preview is labeled and never implies real authentication.
+- All 26 pre-existing web tests in `api.test.ts`/`components.test.tsx` preserved unchanged (plus the untouched `hardening` and `markdown` suites); no assertions weakened; no tests removed. One earlier test that asserted a plain "Disconnect" retry after a 403 CSRF rejection (which would resend the rejected token) was corrected to the behavior above.
+
+### Review correction (post-report, same day)
+
+Independent review flagged one incorrect logout state transition: the original report claimed both HTTP 401 and HTTP 403 logout responses transition the UI to disconnected. That is wrong for 403: the centralized CSRF boundary (`src/server/middleware/csrf.ts`) answers logout rejections with `403 CSRF_INVALID` **without deleting the server-side session**, so the UI must not display "Disconnected" while the server may still hold a valid session.
+
+Corrections made:
+
+- `isSessionLost()` in `ConnectedView.tsx` now prefers the shared error code (`UNAUTHORIZED`) over HTTP status alone; a 403 `CSRF_INVALID` (and any other 403) never reconciles to the disconnected state.
+- The 403 `CSRF_INVALID` failure state no longer offers a plain "Disconnect" retry (which would resend the same rejected token indefinitely). It shows a safe fixed explanation ("Your GitHub connection is still active.") and a **Recheck session** action wired to `App.loadConnection`: it re-probes `GET /api/session`, the still-valid session returns its stored (possibly fresh) CSRF token, and a subsequent logout uses that token; if the session has genuinely gone, the recheck reconciles to the disconnected view.
+- New regression tests: 403 does not transition to disconnected + no resend of the rejected token + recovery action offered; recheck yields a fresh token and the next logout succeeds with it (`toHaveBeenLastCalledWith(FRESH_TOKEN)`); recheck of a gone session reconciles to disconnected with the rejected token never resent. The earlier test asserting a plain retry after 403 was corrected (not weakened elsewhere).
+- Gates re-run after the correction: typecheck 0, full Vitest **587/587** across 17 files (562 baseline + 25 new web tests), both builds exit 0, e2e 10/10, `npm audit` 0, `openspec validate` valid, `git diff --check` clean.
+
+### Verification gates (run from the repository root, after a clean `npm ci`)
+
+- `npm ci` — clean install.
+- `npm run lint` — 0 errors, 0 warnings.
+- `npm run typecheck` — 0 errors (web and server configs).
+- `npm run test` — **587/587** across 17 files (562 baseline + 25 new web tests for Task 3.6).
+- `npm run build` — exit 0; `npm run build:server` — exit 0.
+- `npm run test:e2e` — 10/10 Chromium (Playwright 1.64.1; the headless-shell 1248 browser had to be reinstalled in this environment — the failure was "Executable doesn't exist", an environment issue, not a code regression).
+- `npm audit` — 0 vulnerabilities.
+- `openspec validate modernize-gitdatnote-foundation` — valid (2 pre-existing spec-length warnings, unchanged).
+- `git diff --check` — clean.
+- Node 24/26 compatibility: unchanged from the Task 3.5 baseline (no new dependencies, no engine changes).
+
+### Local browser verification (no credentials configured)
+
+Live against `npm run dev:server` + `npm run dev` at `http://localhost:5173`:
+
+1. Disconnected state renders ("Not connected to GitHub" + Connect button + sample-preview button).
+2. Connect GitHub performs exactly one top-level navigation (button click → `GET /api/auth/github/start`; verified the 302 redirect to `/error?reason=auth_unconfigured`).
+3. Without GitHub App credentials, the safe `auth_unconfigured` error view appears ("GitHub sign-in is not configured for this GitDatNote instance…").
+4. The "Return to GitDatNote" link returns to `/` and the disconnected state re-renders.
+5. The sample preview is clearly labeled and never implies a live connection.
+6. Sample Markdown renders sanitized (DOM verified: no `<script>`, no inline handlers, no dangerous link schemes).
+7. No horizontal overflow at 390 px (mobile) or 1280 px (desktop).
+8. Keyboard Tab moves focus with a visible 2px solid outline.
+9. Dark scheme is usable (verified computed colors + screenshot); light scheme is the default.
+10. No credentials or session IDs in page source or rendered text (only the word "tokens" in explanatory copy); `document.cookie` is empty (the session cookie is HttpOnly); the web code contains zero `console.*` calls, so no credential-shaped console output is possible.
+
+Because actual GitHub App credentials are not configured, connected-state rendering and logout behavior were verified with deterministic mocked HTTP integration and React tests, not live GitHub. **No live GitHub authorization or logout was performed or claimed.**
+
+### Known limitations
+
+- The connected UI (identity, Disconnect, logout states) is verified against mocks; a real OAuth round-trip end-to-end in the browser requires live App credentials that this environment does not have.
+- The `SessionState.csrfToken` optionality reflects the backend contract (`GET /api/session` always supplies it for a valid session); a connected session without it is treated as malformed and handled by refusing logout, per the task requirement.
+- Avatar display is limited to https URLs on the GitHub avatar host; other supplied avatar URLs are silently omitted (no fallback, no referrer leak).
+
+### Task boundary (deferred, untouched here)
+
+- No Task 3.7 (bundle/log credential audit) work.
+- No content editor, publishing capability, repository writes, or content APIs.
+- No token refresh moved into the browser; no localStorage/sessionStorage persistence; no browser-side privileged GitHub calls; no OAuth credentials in JavaScript state or client bundles.
+- No new dependencies, no architectural redesign, no server-side security behavior changes.
+- No commit, push, or archive performed.
+
+### Files changed
+
+- `src/web/api.ts` (+105/−6): `disconnectGithub` method, bare-`ErrorDetail` parsing for logout responses, session-without-CSRF refusal, stale-comment updates.
+- `src/web/types.ts` (+20/−11): `SessionUser`, `SessionState`, state-machine docstring.
+- `src/web/components/ConnectedView.tsx` (+235/−19): connected identity (login/name/safe avatar), "Connected to GitHub" status, Disconnect button with pending/disabled states, logout failure alert, CSRF-failure recovery ("Recheck session" action — no resend of the rejected token), no-CSRF note, `session`/`onDisconnected`/`onRecheckSession` props.
+- `src/web/App.tsx` (+30/−10): `handleDisconnected` (generation bump + state clear), connected-view wiring including `onRecheckSession={loadConnection}`, state-transition updates.
+- `src/web/components/DisconnectedView.tsx` (+6/−1): plain-language copy (no personal access tokens; can disconnect).
+- `src/web/index.css` (+84/−0): identity/avatar/disconnect/logout-status/logout-error/logout-recovery-note styles, `.btn-secondary`, dark-scheme variants.
+- `tests/web/api.test.ts` (+167/−0): 10 new API-client tests.
+- `tests/web/components.test.tsx` (+486/−2): 15 new App-level connection-flow tests (including the 403 `CSRF_INVALID` no-transition and session-recheck recovery tests added by the review correction).
+- `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (+1/−1: Task 3.6 marked complete with evidence).
+- `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
+
+No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `95d54e5`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.
