@@ -201,8 +201,10 @@ export async function handleAuthCallback(
     const code = query.get('code');
 
     // Provider-side consent denial or other GitHub error: handle safely.
+    // The raw query value is never logged — the callback query string is
+    // user-controlled and must not be echoed into the log stream.
     if (errorParam !== null) {
-      deps.logger.warn({ event: 'auth_consent_denied', error: errorParam });
+      deps.logger.warn({ event: 'auth_consent_denied' });
       redirectWithError(res, 'consent_denied');
       return;
     }

@@ -1265,3 +1265,95 @@ Because actual GitHub App credentials are not configured, connected-state render
 - `openspec/changes/modernize-gitdatnote-foundation/audit.md` (+this section).
 
 No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `95d54e5`. Unrelated local changes (`.hermes/skills/*` files and untracked Hermes scripts) preserved untouched.
+
+## Task 3.7 — Credential, Browser Bundle, and Server Logging Security Verification (2026-11-11)
+
+**Security verdict.** No credential or file-content exposure reaches the browser bundle or the server logs. One real defect was found and fixed narrowly: the `auth_consent_denied` warning in `src/server/auth/routes.ts` echoed the raw user-controlled `error` query value into the log stream. All other audit targets are clean, evidenced below by production-build inspection, a canary build test, and a 12-test server log-capture suite.
+
+### 1. Files and configuration boundaries inspected
+
+`vite.config.ts`, `package.json`, `tsconfig.web.json`, `tsconfig.server-build.json`, `.gitignore`, `.github/workflows/ci.yml`, all of `src/web/`, `src/shared/`, `src/server/index.ts`, `src/server/middleware/{logging,errorHandling,csrf,repositoryAuth}.ts`, all of `src/server/auth/` (config, state, github, refresh, routes, index), all of `src/server/session/` (config, crypto, sqlite, index), the existing security/HTTP integration suites, and `.env.example` (sanitized placeholder template only — no `.env` present in the working tree).
+
+### 2. Production browser bundle verification
+
+- Clean production build from `npm ci`: `npm run build` (web → `dist/`) and `npm run build:server` (server → `dist-server/`) — the two output locations the spec designates, kept separate.
+- `dist/` contains `index.html` (0.46 kB), `assets/index-*.css` (2.71 kB), `assets/index-*.js` (317.23 kB), and the static favicon `vite.svg` (public asset, scanned clean). No source maps are produced (Vite `build.sourcemap` unset → default `false`; no `.map` files present).
+- Configuration-boundary review: `vite.config.ts` contains no `define` and no environment-variable injection of any kind; the only `import.meta.env` usage in web source is the read-only `DEV` flag; no file under `src/web/` or `src/shared/` imports from `src/server/`; a grep of both trees for `GITHUB_APP_*`, `access_token`, `refresh_token`, `SESSION_ENCRYPTION*`, `node:crypto`, and `better-sqlite3` returns nothing. Server-only modules are therefore unreachable from the web build graph.
+- Pattern scan over every `dist/` asset (HTML/JS/CSS) for credential-shaped values: token prefixes `ghu_/gho_/ghs_/ghr_/ghp_`, `github_pat_`, any `GITHUB_APP_[A-Z_]+` token value, `client_secret`/`private_key`/PEM `BEGIN ... PRIVATE KEY` headers, `SESSION_ENCRYPTION_KEY`/`SESSION_DB_PATH` values, wire keys `access_token`/`refresh_token`, cookie names `gitdatnote_session`/`gitdatnote_pending_auth`, `X-CSRF`/`csrfToken` with values, `Bearer "` authorization values, 32+ character hex strings, and 48+ character base64 strings — **zero credential-shaped matches**. The only hits in the whole scan were the identifier strings `csrfToken` and `X-CSRF` (schema property keys and an HTTP header name in the API client — no embedded values; false positives, not disclosures). `dist/index.html` is a static shell (root div + module script tag, no inlined data). `dist-server/` contains env-var name references in config-reading code, as expected for the server-only bundle.
+- Canary build test (`tests/unit/bundle-secrets.test.ts`, 3 tests): runs the real production `vite.config.ts` (resolved through Vite's own `loadConfigFromFile`) into an isolated temporary output directory with synthetic canary values set as `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`, `SESSION_ENCRYPTION_KEY`, and a `VITE_`-prefixed variable, then asserts that no canary value and no forbidden server-only identifier appears in any emitted asset. This proves the only environment surface reachable from a browser build is what web code explicitly reads. All 3 pass.
+
+### 3. Server logging verification
+
+- Implemented contract (reviewed in `src/server/middleware/logging.ts`): request log lines carry exactly `method`, sanitized route label (a fixed label for known routes, a fixed `{owner}/{repo}` template for the parameterized content route, a fixed fallback for unknown routes — user-controlled path segments and query strings never reach the log stream; see §11 for the review correction), `status`, and `durationMs`. Event log lines carry fixed event names plus stable reason codes. No Authorization or Cookie header values, no request/response bodies, no query values, and no article content appear at any call site.
+- **Confirmed vulnerability (1) — found and fixed:** `handleAuthCallback` in `src/server/auth/routes.ts` logged the raw `error` query parameter on consent denial (`deps.logger.warn({ event: 'auth_consent_denied', error: errorParam })`). The callback query string is user-controlled, so an attacker could place any string (including token-shaped values) into the log stream. Minimal correction: the warning now logs the fixed event name only, with a comment stating the raw query value is never logged. No other logging behavior changed.
+- Failure-path matrix exercised against the real HTTP app (ephemeral port, mocked GitHub `fetchImpl`, temp SQLite databases, injected clock, `logLevel: 'debug'` — the most verbose level; captured console output asserted per case) with run-time-generated synthetic canaries (32 random bytes hex each; never real credentials): authentication start (unconfigured → safe 302 + fixed `auth_start_unavailable` event; configured → authorize URL contains no credential values); OAuth callback with invalid state (synthetic authorization code in the query never appears in logs; safe 302 to `/error?reason=state_invalid`); consent denial with a synthetic `error` canary in the query (**not** in logs — regression for the fix above); token exchange failure (upstream 500 whose body carries a canary → safe 401 `TOKEN_ERROR` envelope; canary absent from response body and logs); token refresh success (no access/refresh token value logged) and refresh failure (rejected refresh → session invalidated; no credential values in logs or error bodies); session lookup failure (unknown session cookie → safe 401 envelope; cookie value never logged); CSRF rejection (rejected token value never logged); repository discovery (unauthenticated → 401 envelope; upstream 502 whose error text carries a canary → safe `GITHUB_UNAVAILABLE` envelope, canary absent from body and logs, fixed `repositories_failed` marker present); repository authorization failures; logout success (204 + `auth_logout` event) and failure; malformed/odd request targets (raw request input never logged); and a direct `sendUnexpectedError` contract test (a raw exception whose message carries a canary → 500 safe envelope; only the error's stable name is logged, the message is never logged).
+
+### 4. Repository-content confidentiality baseline (for Phase 4)
+
+- Request/response logging includes no bodies anywhere — no endpoint currently returns repository content, and the request logger records metadata only.
+- Error logging never interpolates file contents: no call site in the current server builds a log payload from file data.
+- The safe Markdown preview is fully client-side: opening it and selecting a sample repository generates no server request carrying content (verified in the local browser; the server log during the preview session shows only asset/session GETs).
+- Repository-path handling uses fixed route templates and pathname-only logging; no sensitive paths or query values are emitted.
+- No Phase 4 content handlers were implemented, and none are claimed as tested end-to-end. When Phase 4 adds real content requests, the metadata-only request log, fixed event names, and the canary discipline of this suite must be preserved.
+
+### 5. Findings classification
+
+- **Confirmed vulnerability (1):** `auth_consent_denied` raw `error` query echo — reproduced with a synthetic canary, fixed minimally in `src/server/auth/routes.ts`, regression-tested in `tests/unit/server/security-logging.test.ts`.
+- **Hardening issues:** none.
+- **False positives:** `csrfToken`/`X-CSRF` identifier strings in `dist/` (schema keys/header names, no values); env-var name strings in `dist-server/` (server-only bundle by design); public GitHub endpoint strings and brand text (not flagged, per task guidance).
+- **Future boundary:** Phase 4 content operations must keep bodies out of log payloads; the current boundary makes that a constraint on new handlers, not an existing leak.
+
+### 6. Regression tests added
+
+- `tests/unit/server/security-logging.test.ts` (new, 12 tests) — log-surface contract plus the failure-path matrix above.
+- `tests/unit/bundle-secrets.test.ts` (new, 3 tests) — canary production-build scan.
+- 15 new tests; full suite 587 baseline + 15 = **602/602 across 19 files**; no existing test removed or weakened. e2e remains 10/10.
+
+### 7. Verification gates
+
+Final gate run (after all corrections; per-gate exit codes, `set -o pipefail`): lint 0; typecheck 0; test 602/602; build 0; build:server 0; test:e2e 10/10; npm audit 0 vulnerabilities; `openspec validate modernize-gitdatnote-foundation` valid (2 pre-existing spec-text warnings, unchanged); `git diff --check` clean. (An earlier `&&`-chained gate run masked two type/lint errors in the new test file — unused variables and an incorrect `loadConfigFromFile` argument — both fixed; the masked runs are not reported as passed.)
+
+### 8. Local browser observations (no real credentials configured — unconfigured instance)
+
+1. Disconnected UI renders ("Not connected to GitHub", Connect GitHub, sample preview link). ✓
+2. Connect GitHub performs exactly one navigation (302 → `/error?reason=auth_unconfigured`). ✓
+3. Unconfigured authentication produces the safe error view (fixed copy, no configuration details). ✓
+4. Return link works (back to the disconnected view at `/`). ✓
+5. Sample-data preview clearly labeled ("Sample data only. This is not an actual GitHub connection."). ✓
+6. Sample Markdown renders sanitized (marked + DOMPurify; no script/iframe/handler injection in the preview markup). ✓
+7. Session and repository failures expose no credentials (`/api/session` → `{"connected":false}`; `/api/repositories` → safe 401 envelope; query strings on API calls are never echoed). ✓
+8. Browser console reveals no secrets or session IDs (hooked `console.*` across the whole flow: only Vite HMR debug lines and the React DevTools info message). ✓
+9. Server request logs reveal no sensitive query values (live log: `callback?code=canary-code-leak&state=aaaa` logged as `path:"/api/auth/github/callback"` only; every request line is method/pathname/status/duration). ✓
+10. No unexpected frontend regressions (all views and transitions behave as accepted in Tasks 3.2–3.6). ✓
+Live GitHub authorization was NOT performed — no real App credentials exist in this environment; the unconfigured-state paths are what the environment supports.
+
+### 9. Residual limitations
+
+- Live OAuth/token-exchange/refresh round-trips were not executed (no real App credentials); all GitHub-facing paths are verified against deterministic mocks and canaries.
+- Canary values are random per run and cover the audited credential classes, not the infinite space of possible secret encodings; assurance comes from the combination of the configuration-boundary review (no environment-injection path exists in the web build), the pattern scan of every emitted asset, and the canary build test.
+- Production source maps are not generated (verified absent); should they ever be enabled, the web build graph still cannot include server modules, but embedded secrets must remain out of web code.
+- Log-level verification is anchored at `debug` (the most verbose level); the logger emits one fixed payload shape per level, so higher levels are strict subsets.
+- Dependency supply-chain auditing is out of scope for this task (`npm audit` reports 0 vulnerabilities; no action taken).
+
+### 10. Task boundary
+
+No Phase 4 work; no authentication, logging-framework, or repository-access redesign; no new dependencies; no schema changes. No commit, push, or archive performed. Unrelated local changes (`.hermes/skills/*`, untracked Hermes scripts) preserved untouched.
+
+### 11. Review corrections (2026-11-12)
+
+Independent review of the final patch confirmed the `auth_consent_denied` fix and the canary suites, and requested two narrowly scoped corrections. Both are applied.
+
+**Correction 1 — request log path labeling (user-controlled path segments excluded).**
+The request logger previously recorded the raw URL `pathname` (`new URL(req.url).pathname`). Query strings were already excluded, but user-controlled path segments could still reach the log stream (e.g. a request to `/api/repos/<owner>/<repo>/content/../../<secret>` or any crafted path). Minimal, deterministic correction for logging only:
+
+- `src/server/middleware/logging.ts` gains `labelRequestPath(pathname)`: a fixed label for each known static route (a six-entry `STATIC_ROUTE_LABELS` set), the fixed template `/api/repos/{owner}/{repo}/content` for parameterized repository content paths (matched via the existing `matchContentRepositoryRef` — no owner or repository value is ever logged), and fixed fallback labels for everything else (`/api/*` for unknown API paths, `/*` for any other path). Invalid request targets keep the existing `(unparseable)` marker (produced in `src/server/index.ts`, which now computes `logPath = urlParseFailed ? UNPARSEABLE_PATH : labelRequestPath(pathname)` and logs only `logPath`). The dispatcher still routes on the raw pathname — routing behavior, HTTP responses, status codes, and method/status/duration logging are unchanged. No general routing framework; authentication, CSRF, and repository authorization behavior untouched (the `repositoryAuth.ts` → `logging.js` import stays type-only, so no runtime import cycle is introduced).
+- New regression tests in `tests/unit/server/security-logging.test.ts` (5): an unknown `/api/<canary>` route returns the same 404 as before while the canary segment is absent from logs and the fixed `/api/*` fallback label is present; an unauthenticated parameterized `/api/repos/<canary-owner>/<canary-repo>/content` request returns the same 401 `UNAUTHORIZED` response (content boundary fails closed before any upstream call) while both canary segments are absent and the fixed template is logged; a non-API path `/<canary>` returns 404 with the `/*` fallback and no canary; unparseable absolute-form targets (port > 65535 — accepted by Node's parser, rejected by `new URL`, verified by probe) still yield the safe 422 `PATH_INVALID` envelope with the `(unparseable)` marker and no raw target value logged; and a known static route (`/api/health`) still emits its request event with its exact label plus method/status/duration (observability preserved). A further baseline test proves article bodies fetched from logged endpoints never appear in the log stream.
+
+**Correction 2 — environment restoration after bundle canary tests.**
+`tests/unit/bundle-secrets.test.ts` now saves each canary variable's original value or absence in `beforeAll` before applying the synthetic canaries, and `restoreEnv()` in `afterAll` restores the exact original values (deleting only variables that were previously absent). Cleanup is also guaranteed when build setup fails: the Vite config load and build run inside `try/finally`-style cleanup so the environment is restored on any path. The existing production `vite.config.ts` canary-build approach (resolved via Vite's own `loadConfigFromFile`, isolated temp output dir removed in cleanup) and all its assertions are preserved unchanged.
+
+**Verification gates (post-correction run).** See the gate line in the Task 3.7 entry of `tasks.md` and §12 below.
+
+### 12. Final test totals (post-correction)
+
+Full suite: **607/607 across 19 files** (587 baseline + 20 Task 3.7 tests: 12 security-logging + 5 new path-labeling canary tests + 3 bundle canary-build tests); no baseline test removed or weakened. E2E remains 10/10. All other gate results identical to §7 (lint 0, typecheck 0, build 0, build:server 0, `npm audit` 0 vulnerabilities, `openspec validate` valid, `git diff --check` clean).

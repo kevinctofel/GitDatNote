@@ -11,10 +11,10 @@
  *   echoes the raw target.
  * - Non-`/api` paths -> plain-text 404 (the frontend is served by Vite in dev
  *   and by static hosting in production).
- * - Structured request logging: method, pathname, status, duration. Never
- *   logs bodies, query strings, headers, or credentials. Future sensitive or
- *   parameterized routes must log sanitized route templates (e.g.
- *   `/api/articles/{id}`) rather than raw path segments.
+ * - Structured request logging: method, route label, status, duration. Never
+ *   logs bodies, query strings, headers, or credentials. Request lines log
+ *   a minimal, deterministic route label (`labelRequestPath`) rather than
+ *   raw path segments.
  * - Standard API error handling via the shared contracts in `src/shared`.
  *
  * Authentication routes (task 3.2), all server-side:
@@ -49,7 +49,12 @@ import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import type { Server } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createLogger, logRequest, resolveLogLevel } from './middleware/logging.js';
+import {
+  createLogger,
+  labelRequestPath,
+  logRequest,
+  resolveLogLevel,
+} from './middleware/logging.js';
 import type { LogLevel } from './middleware/logging.js';
 import { sendApiNotFound, sendJsonError, sendUnexpectedError } from './middleware/errorHandling.js';
 import { checkCsrf, respondToCsrf } from './middleware/csrf.js';
@@ -171,6 +176,11 @@ export function createApp(options: AppOptions = {}): Server {
       urlParseFailed = true;
     }
 
+    // Task 3.7: the request log line carries a deterministic route label
+    // instead of the raw pathname. Routing itself still uses the raw
+    // pathname (see the dispatch below).
+    const logPath = urlParseFailed ? UNPARSEABLE_PATH : labelRequestPath(pathname);
+
     // Log exactly once per completed response, with the final status.
     res.on('finish', () => {
       const durationMs = Math.max(
@@ -179,7 +189,7 @@ export function createApp(options: AppOptions = {}): Server {
       );
       logRequest(logger, {
         method: req.method ?? 'GET',
-        path: pathname,
+        path: logPath,
         status: res.statusCode,
         durationMs,
       });
