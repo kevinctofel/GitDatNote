@@ -1357,3 +1357,105 @@ The request logger previously recorded the raw URL `pathname` (`new URL(req.url)
 ### 12. Final test totals (post-correction)
 
 Full suite: **607/607 across 19 files** (587 baseline + 20 Task 3.7 tests: 12 security-logging + 5 new path-labeling canary tests + 3 bundle canary-build tests); no baseline test removed or weakened. E2E remains 10/10. All other gate results identical to §7 (lint 0, typecheck 0, build 0, build:server 0, `npm audit` 0 vulnerabilities, `openspec validate` valid, `git diff --check` clean).
+
+## Task 4.1 — GitHub Repository Content Adapter (2026-11-12)
+
+**Summary.** Implemented `src/server/content/` as a small, typed, server-only service performing GitHub Contents API operations behind a narrow interface, reusing the existing shared path/content validation and error contracts, with zero new HTTP routes and zero contact with GitHub at test time. No Phase 4 integration work (Tasks 4.2–4.8) was started.
+
+### 1. Scope and acceptance
+
+Task 4.1 only: `listContent`, `readContent`, `createContent`, `updateContent` behind an interface, with all paths validated against the repository's configured content root before any GitHub request. No HTTP endpoints, no file deletion, no editor/publish/Eleventy work, no changes to session encryption, OAuth, CSRF, authorization, token refresh, or Phase 3 security controls.
+
+### 2. Interface and dependency design
+
+- `src/server/content/types.ts` defines:
+  - `ContentAdapter` — the four operations exactly as specified: `listContent(owner, repo, path)`, `readContent(owner, repo, path)`, `createContent(owner, repo, path, content, message?)`, `updateContent(owner, repo, path, content, expectedSha, message?)`; a `contentRoot` getter exposes the server-resolved root.
+  - `ContentClient` — a transport-agnostic structural boundary covering only `rest.repos.getContent` and `rest.repos.createOrUpdateFileContents`. Production injects a real Octokit `Github` instance (verified assignable by `tsc`); tests inject a small mock object. No credentials appear in the boundary.
+  - `ContentAdapterOptions` — `{ client, contentRoot? }`; credentials, content-root configuration, and the client are injected through construction, not per-operation parameters.
+  - `ContentWriteResult` — `{ path: string; sha: string }` (relative path + new blob SHA).
+  - `ContentAdapterError` — a service-level error carrying the shared safe `ErrorDetail` (`code`, `message`, `retryable`, optional `currentSha`); codes are exactly the shared `ErrorDomain` vocabulary, so future HTTP handlers map to the standard shared error response without translation.
+- Return types reuse existing shared types: `DirectoryListing` and `FileContent` (no duplicate definitions).
+- Read/list are transport-agnostic: `getContent` returns a single object for files and an array for directories; the adapter branches on that shape and fails safely on anything else.
+
+### 3. Concrete Octokit operations
+
+- `listContent` → `repos.getContent({ owner, repo, path })`; expects an array; maps each entry to `{ name, type: 'file' | 'dir', sha, size }`; immediate children only (no recursion); unexpected entry shapes fail safely rather than emitting fabricated data.
+- `readContent` → `repos.getContent(...)`; expects an object with `type === 'file'` and a string `content` field (base64); decodes **strictly** (strict base64 shape with a decode round-trip check, then fatal UTF-8 decoding); returns relative path, UTF-8 content, blob SHA, and size in bytes. Directories, `symlink`/`submodule`/other types, and missing `content` are rejected as unexpected responses (Task 4.5 maps them to `INTERNAL_ERROR`). A **valid zero-byte file (empty base64 `content`) is supported** and returned as empty content; malformed or truncated base64 and byte sequences that are not valid UTF-8 also fail with safe `INTERNAL_ERROR` — never a permissive fallback that would silently alter Markdown. Valid Unicode content is preserved exactly.
+- `createContent` → existence pre-check via `repos.getContent` (404 → proceed; `file`/`dir` → `FILE_EXISTS`, safe message), then `repos.createOrUpdateFileContents` with **no** `sha` field. A 409 race after the pre-check is reported `FILE_EXISTS` — the write is never retried automatically.
+- `updateContent` → SHA pre-check via `repos.getContent` (404 → `FILE_NOT_FOUND`; SHA mismatch → `SHA_CONFLICT` with `currentSha`), then `repos.createOrUpdateFileContents` **with** the `sha` field set to the caller's `expectedSha` — it is never omitted or substituted. A 409 race triggers exactly one read-only refetch to report the concurrent SHA as `SHA_CONFLICT` (the write itself is never retried).
+- The installed Octokit version's Contents API surface was probed directly (`repos.getContent`, `repos.createOrUpdateFileContents`); `throttle`/retry plugins are disabled (`throttle: { enabled: false }`, no `retry` config) so upstream failures surface immediately through the shared error contract and writes are never auto-retried.
+
+### 4. Path validation and content-root boundary
+
+- The shared `validateContentPath(contentRoot, relativePath, kind)` is the single path validator — no second validator was created. It enforces relative-only paths, rejects absolute paths, null bytes, control characters, and backslashes; canonicalizes `.`/safe `..` segments; rejects traversal outside the root; allows an empty path only for `list`; requires a nonempty file path for read/create/update; preserves legitimate nested paths. All rejection happens **before any Octokit call** (verified in tests by asserting the mock client was never invoked).
+- The content root is validated at construction (`validateContentRoot`) and comes from server-resolved repository configuration; the adapter never accepts a browser-supplied root. `contentRoot` defaults to `DEFAULT_CONTENT_ROOT` (`src/posts`), matching current repository discovery; configurable roots can be supplied later without changing the adapter.
+- Content size uses the shared `validateMarkdownContent` (byte-based `MAX_MARKDOWN_BYTES` limit) before any write request; oversized content fails `CONTENT_TOO_LARGE` with no GitHub contact.
+
+### 5. Credential injection
+
+- The adapter never reads, stores, refreshes, or manages credentials: no token fields, no session lookups, no refresh logic, no personal-access-token configuration, no browser-side requests, no application-wide privileged token.
+- `createAuthenticatedContentClient(token)` in `src/server/content/index.ts` builds an Octokit client from a caller-supplied token string (with retry/throttling disabled). When the Task 4.2–4.4 endpoint work lands, the existing authenticated HTTP boundary (Task 3.5 refresh service) supplies the currently valid, refreshed GitHub App **user** access token to that constructor per request.
+- The adapter performs **no repository authorization** and is not a substitute for it: it operates only after its caller has enforced the established user-plus-App repository permission checks (existing `repositoryAuth` middleware).
+
+### 6. SHA handling
+
+- Reads report the blob SHA GitHub returns. Creates return the new blob SHA from the PUT response; updates return the new blob SHA and require a nonempty `expectedSha` (missing/invalid → safe `PATH_INVALID`, no GitHub contact).
+- Updates send the expected SHA in the request (Contents API `sha` field) so GitHub enforces optimistic concurrency; GitHub 409 is never silently overwritten — it resolves to `FILE_EXISTS` (create race) or `SHA_CONFLICT` + `currentSha` (update race) via one read-only refetch.
+- `currentSha` exposure is compatible with Task 4.4's future conflict-response requirement without adding HTTP behavior now.
+
+### 7. Commit metadata decisions
+
+- Follows the OpenSpec decision exactly: no invented committer name, no fabricated email, no hardcoded identities — `committer` and `author` fields are **omitted by default** so GitHub attributes the commit to the authenticated token.
+- Default commit messages: `Create {relativePath}` and `Update {relativePath}`.
+- Custom messages pass `sanitizeCommitMessage()`: newline stripping and a 200-character cap (existing OpenSpec constraint). Commit messages never carry credentials or untrusted file content (the message is caller-controlled metadata only).
+
+### 8. Error behavior
+
+- Reuses the shared safe error contract (`ErrorDetail`, `ErrorDomain`) and the existing mapping helpers — no new error vocabulary. Mapping:
+  - Path/SHA/size validation failures → `PATH_INVALID` (including invalid owner/repo references and missing or malformed `expectedSha`, all checked locally with no upstream request) / `CONTENT_TOO_LARGE`, all produced before any GitHub call.
+  - 404 → `FILE_NOT_FOUND` (safe message, never echoing raw upstream text).
+  - 405/406 → `FILE_EXISTS` safe message.
+  - 409 on update → `SHA_CONFLICT` with `currentSha` via `shaConflictDetail` (never echoing raw upstream text).
+  - Definitive **401 → `UNAUTHORIZED`**, kept distinguishable so future HTTP integration can drive the existing session-invalidation behavior.
+  - 429, or 403 with `x-ratelimit-remaining: 0` → `RATE_LIMITED` (distinct from ordinary 403 → `REPO_NOT_ALLOWED`).
+  - 5xx, connection errors, and other network failures → `GITHUB_UNAVAILABLE` (retryable), via `mapGithubHttpError` / `mapGithubNetworkError`.
+  - Unexpected response shapes (non-array listing, non-file read, missing `content`/`sha`, malformed or truncated base64, invalid UTF-8) → safe `INTERNAL_ERROR` with fixed messages.
+- No raw Octokit exception messages, Authorization headers, tokens, or file content ever appear in error payloads or logs. Writes are never auto-retried.
+- Task 4.5's HTTP error-mapping layer is intentionally not implemented here.
+
+### 9. Tests and results
+
+- New `tests/unit/server/content-adapter.test.ts` — **50 tests**, all GitHub behavior mocked via the `ContentClient` boundary (no network, no real credentials, no live repositories, no production data, deterministic, no sleeps).
+- Covers all 20 required Task 4.1 adapter properties: content-root listing, nested listing, file read (content/SHA/size), `Journal` root, `src/posts` root, absolute-path rejection, traversal rejection, null-byte rejection, nested-path allowance, empty-path rejection for file ops, create via Contents API, UTF-8→base64 encoding, no fabricated committer metadata, create overwrite protection, update with expected SHA, no omitted/substituted SHA, invalid/missing expected-SHA rejection, new-SHA return after writes, oversized-content rejection, malformed-response safety.
+- Plus: 401/403/rate-limit/5xx/network error mapping, 409 create race, 409 update race (one refetch, write never retried), `FILE_NOT_FOUND` for missing update targets, malformed listing/file shapes (no content leak), commit-message newline stripping and 200-char cap, default messages, an early Unicode base64 case (accented characters + CJK + emoji), and strict content decoding (valid zero-byte empty file, malformed/truncated base64 rejection, invalid UTF-8 rejection, line-wrapped base64 accepted while other stray whitespace is rejected). Task 4.6's dedicated UTF-8 round-trip acceptance and Task 4.7's integration matrix are deliberately not duplicated or claimed.
+- Focused run: **50/50 passing** (all 46 original tests preserved; 4 new strict-decoding tests added by the review correction). Existing `src/shared/validate.ts` unit tests not duplicated.
+
+### 10. Verification gates (re-run after the 2026-11-12 review corrections)
+
+| Gate | Result |
+|---|---|
+| Focused `content-adapter` tests | **50/50** passing (46 original preserved + 4 new strict-decoding tests) |
+| `npm run lint` | exit 0, 0 warnings |
+| `npm run typecheck` | exit 0 (web + server) |
+| `npm run test` | **657/657** across 20 files (607 Phase 3 tests + 50 Task 4.1 tests; none removed or weakened) |
+| `npm run build` | exit 0 |
+| `npm run build:server` | exit 0 |
+| `npm run test:e2e` | **10/10** passing |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing length warnings in `specs/github-connection/spec.md`, unchanged) |
+| `git diff --check` | clean |
+
+(`npm ci` was not re-run: no dependencies changed during the review corrections.)
+
+Node 24/26 compatibility preserved (no new runtime dependencies added; `octokit`/`@octokit/*` already installed and used).
+
+### 11. Remaining Phase 4 integration dependencies
+
+- Task 4.2 (GET endpoint) must supply the per-request authenticated client from the Task 3.5 refresh service, run the existing `repositoryAuth` checks first, and map `ContentAdapterError` codes to HTTP status codes via the Task 4.5 mapping layer.
+- Task 4.3/4.4 finalize HTTP-level `FILE_EXISTS` / `PATH_INVALID` / `CONTENT_TOO_LARGE` / `SHA_CONFLICT` (`currentSha`) responses; the adapter already produces exactly those codes.
+- Task 4.5 implements the full HTTP error-mapping layer; Task 4.6 the dedicated UTF-8 round-trip milestone; Task 4.7 the comprehensive mocked integration matrix; Task 4.8 retry UI states. None started here.
+- Repository content-root configuration subsystem is intentionally not built; the adapter accepts the resolved root (default `src/posts`) so a future subsystem can supply it.
+
+## Task boundary (Tasks 4.2–4.8 not started)
+
+No HTTP routes were registered in `src/server/index.ts` or elsewhere. No GET/POST/PUT content endpoints, no HTTP error-mapping integration, no UTF-8 round-trip milestone, no integration matrix, no retry UI, no file deletion, no editor/publish/Eleventy/UI work. No changes to session encryption, OAuth, CSRF, authorization, token refresh, or Phase 3 security controls. The working tree change set for Task 4.1 is exactly: `src/server/content/types.ts` (new), `src/server/content/index.ts` (new), `tests/unit/server/content-adapter.test.ts` (new), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.
