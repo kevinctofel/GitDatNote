@@ -67,6 +67,7 @@
  */
 
 import type {
+  ContentResult,
   DirectoryListing,
   ErrorDetail,
   FileContent,
@@ -114,6 +115,19 @@ export interface ContentClient {
 export interface ContentAdapter {
   /** The server-resolved content root for the target repository. */
   readonly contentRoot: string;
+
+  /**
+   * Task 4.2 — read a single path: the directory listing when the path is
+   * empty or denotes a directory, the UTF-8 file content when it denotes a
+   * file. One upstream request per call; the Contents API response shape
+   * (array vs. single object) determines which result is returned. Never
+   * recurses and never reaches outside the content root.
+   */
+  getContent(
+    owner: string,
+    repo: string,
+    path: string,
+  ): Promise<ContentResult>;
 
   /**
    * List the immediate children of a directory inside the content root.

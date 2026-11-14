@@ -1459,3 +1459,85 @@ Node 24/26 compatibility preserved (no new runtime dependencies added; `octokit`
 ## Task boundary (Tasks 4.2–4.8 not started)
 
 No HTTP routes were registered in `src/server/index.ts` or elsewhere. No GET/POST/PUT content endpoints, no HTTP error-mapping integration, no UTF-8 round-trip milestone, no integration matrix, no retry UI, no file deletion, no editor/publish/Eleventy/UI work. No changes to session encryption, OAuth, CSRF, authorization, token refresh, or Phase 3 security controls. The working tree change set for Task 4.1 is exactly: `src/server/content/types.ts` (new), `src/server/content/index.ts` (new), `tests/unit/server/content-adapter.test.ts` (new), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.
+
+## Task 4.2 — Authenticated repository content read endpoint (2026-11-12)
+
+### 1. Endpoint and dispatch
+
+New route: `GET /api/repos/{owner}/{repo}/content?path={relativePath}`, registered in `src/server/index.ts`. Dispatch (in the existing `/api/repos/...` branch, after the centralized CSRF boundary):
+
+1. `matchContentRepositoryRef(pathname)` recognizes the content surface (unchanged).
+2. `isContentRead` is true only for `GET` on exactly `/api/repos/{owner}/{repo}/content` (the requested path arrives in the `path` query parameter, relative to the content root). Any other request on the surface — other methods, or paths beneath `/content` — keeps the established behavior: boundary, then the standard 404 when authorized (those handlers belong to later tasks).
+3. `requiredAccess` follows the original authorization semantics (restored in the post-review correction): every `GET` and `HEAD` request on the content surface requires `'read'`; `POST`, `PUT`, `DELETE`, and other state-changing operations require `'write'`.
+4. `enforceContentBoundary` runs exactly as before; when the outcome is authorized, `handleContentRead` runs; when denied, the boundary has already written the safe error and the handler is never reached.
+
+### 2. Boundary reuse and credential semantics (no reimplementation)
+
+`src/server/middleware/repositoryAuth.ts` is the Task 3.4 boundary, reused unchanged in logic. The only change is the return type: `enforceContentBoundary` now returns a `ContentBoundaryOutcome` — `{ authorized: true, session }` on success (previously `true`), `{ authorized: false }` on denial (previously `false`, response already written). The authorized outcome carries the **exact session state the authorization decision was made on**, including the refreshed access token produced by the Task 3.5 refresh step when one was needed. Handlers must build their authenticated client from that credential — never from a fresh session-storage read (which may still hold the pre-refresh token) and never from another user's credential. Decision logic, refresh integration, session-invalidation-on-401, and all error mappings are untouched.
+
+### 3. Handler (`handleContentRead` in `src/server/index.ts`)
+
+- Reads the `path` query parameter from the already-safe parsed URL; missing/empty → the content root itself.
+- Builds the client via `contentClientFactory(session.credentials.accessToken)` — an `AppOptions` injection point defaulting to `createAuthenticatedContentClient` (real Octokit); tests inject a recording factory. One client per request, never shared or cached.
+- Wraps it in the Task 4.1 `ContentAdapter` (`createContentAdapter({ client, contentRoot: DEFAULT_CONTENT_ROOT })`) and calls the new `adapter.getContent(owner, repo, path)` — a single upstream Contents API request.
+- Success: `200` + `JSON.stringify(result)` where `result` is `DirectoryListing` (canonical relative `path` + immediate `children`) or `FileContent` (canonical relative `path`, raw UTF-8 `content`, blob `sha`, `size`). No rendering or sanitization — that remains a web-preview responsibility.
+- `ContentAdapterError` handling: a definitive GitHub 401 (`UNAUTHORIZED`) invalidates the session through the established session-storage mechanism (same as repository discovery and the boundary); 403/429 never do. The adapter's safe `ErrorDetail` envelope is sent as-is via `sendJsonError` (status derived from the shared code→status contract); anything else goes to `sendUnexpectedError`.
+
+### 4. Adapter change: `getContent` (single-request dispatch)
+
+Added to `src/server/content/index.ts` (the Task 4.1 module) and to the `ContentAdapter` interface in `types.ts`:
+
+- Validates the repo ref and the content path with the shared validators **before any request**, using the `directory` path kind so both the empty path and any structurally valid relative path (file- or directory-looking) pass; escaping roots, absolute paths, backslashes, and control characters → `PATH_INVALID` with zero upstream calls.
+- One `client.rest.repos.getContent` call with `validation.repositoryPath` (content root prefixed).
+- Array response → `DirectoryListing` via the existing `parseDirectoryEntry` (immediate children only, never recurses).
+- Single-object response → file read only when `type: 'file'` with a valid blob SHA and non-negative size and base64 `content`; content decoded through the Task 4.1 strict decode (`decodeContent`). Any other shape (symlink, bare directory object, unknown type, non-object payload, bad SHA, unparseable base64) fails closed with `INTERNAL_ERROR` — consistent with `readContent`.
+- Upstream failures go through the existing shared `upstreamError` mapping (404 → `FILE_NOT_FOUND`, 401 → `UNAUTHORIZED`, 403 → `REPO_NOT_ALLOWED`, 429 / 403-with-`x-ratelimit-remaining: 0` → `RATE_LIMITED`, 5xx/network → `GITHUB_UNAVAILABLE`).
+- No second operation was touched: `listContent`/`readContent`/`createContent`/`updateContent` are unchanged.
+
+### 5. Authorization on every request (verified, not assumed)
+
+- Unauthenticated → `401 UNAUTHORIZED`; repository outside the App installation or excluded from the selection → `403 REPO_NOT_ALLOWED`; repository lacking read permission → `403 REPO_NOT_ALLOWED`. All occur in the boundary **before** `contentClientFactory` is ever called (tests assert the factory received zero tokens and the mock client received zero upstream requests in each denial case).
+- Paths beneath `/content` have no registered handler yet (later tasks): every `GET` and `HEAD` request requires repository read access (original semantics restored), so both read-only and writable repositories pass read authorization and then receive the standard `404 FILE_NOT_FOUND` without any content client construction. `POST`, `PUT`, `DELETE`, and other state-changing operations still require write access.
+
+### 6. Test suite
+
+New `tests/unit/server/content-endpoint.test.ts`: **36 tests**, fully mocked — no real GitHub credentials, tokens, or repositories (ephemeral ports, mocked `fetchImpl`, temp SQLite, injected clock, mock `ContentClient` via the injected `contentClientFactory`, which records the access token used and every upstream request path). Coverage:
+
+- Directory listings: content root (no/empty/`.`/collapsing-`..` path), nested directory returning immediate children only, trailing-slash normalization, canonical relative paths in responses, exactly one upstream request per call.
+- File reads: raw UTF-8 Markdown returned byte-exact (unicode + embedded `<script>` untouched — no server-side rendering/sanitization), empty zero-byte file, file-shaped vs directory-shaped dispatch by upstream response.
+- Path validation: traversal outside the root, absolute paths (raw and percent-encoded), backslash paths → `422 PATH_INVALID` with zero upstream requests.
+- Upstream error mapping: 404 `FILE_NOT_FOUND` (session preserved), 401 `UNAUTHORIZED` (session invalidated — follow-up read 401s), 403 `REPO_NOT_ALLOWED` (session preserved), 403 + `x-ratelimit-remaining: 0` → `429 RATE_LIMITED`, 429 → `RATE_LIMITED`, 5xx → `502 GITHUB_UNAVAILABLE`, network failure → `GITHUB_UNAVAILABLE` (session preserved).
+- Fail-closed malformed upstream data: unknown file type (symlink), bare directory object for a file-shaped path, invalid blob SHA, unparseable base64, non-object payload, symlink directory entry → `500 INTERNAL_ERROR`; no credential exposure in bodies or logs.
+- Boundary: all denial cases with zero client construction; `/content` sub-paths pass read authorization (read-only and write repos alike) and receive the standard 404 without any content client construction; HEAD → standard 404.
+- Credentials: client built from the session token when no refresh is needed; client built from the **refreshed** token when the stored token is near expiry (ordered token-endpoint mock: short-lived sign-in token, then refreshed token); no access/refresh tokens or client secret in responses or server logs across denied, allowed, and state-changing requests.
+
+Existing-test updates (`tests/unit/server/authorization.test.ts`): two tests previously asserted the "not-yet-existing handler" standard 404 for an authorized `GET /content` and would otherwise have exercised a real Octokit through the new route — they now use an injected mock factory (`mockContentFactory`) asserting the content-root listing and the session token. The credentials-leak test uses the same factory so its "allowed" request does not reach GitHub. `createHarness` accepts an optional `contentClientFactory` option (defaults to production behavior). No other test was removed or weakened.
+
+### 7. Verification gates
+
+| Gate | Result |
+|---|---|
+| `npm ci` | exit 0 (0 vulnerabilities) |
+| Focused `content-endpoint` tests | **36/36** passing |
+| `authorization.test.ts` (updated) | 19/19 passing (2 rewritten, rest unchanged) |
+| `npm run lint` | exit 0, 0 warnings |
+| `npm run typecheck` | exit 0 (web + server) |
+| `npm run test` | **693/693** across 21 files (657 pre-existing + 36 new; none removed or weakened) |
+| `npm run build` | exit 0 |
+| `npm run build:server` | exit 0 |
+| `npm run test:e2e` | **10/10** passing |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing length warnings in `specs/github-connection/spec.md`, unchanged) |
+| `git diff --check` | clean |
+
+No new dependencies; Node 24/26 compatibility preserved.
+
+### 8. Scope notes
+
+- The browser does not have a working repository content interface — no UI work was done or claimed (web preview integration is a later task).
+- The content root is the shared `DEFAULT_CONTENT_ROOT` (`src/posts`); the root-configuration subsystem is intentionally not built (a later concern).
+- Tasks 4.3–4.8 (POST/PUT endpoints, full HTTP error-mapping layer, dedicated UTF-8 round-trip milestone, comprehensive mocked integration matrix, retry UI) were not started.
+
+### Task boundary (Tasks 4.3–4.8 not started)
+
+No POST/PUT content handlers, no `FILE_EXISTS`/`CONTENT_TOO_LARGE`/`SHA_CONFLICT` HTTP responses, no dedicated UTF-8 round-trip milestone, no integration matrix, no retry UI, no file deletion, no editor/publish/Eleventy/UI work. No changes to session encryption, OAuth, CSRF, token refresh, or Phase 3 security controls beyond the boundary's return-type widening described in §2. The working tree change set for Task 4.2 is exactly: `src/server/index.ts` (route + handler + `AppOptions.contentClientFactory`), `src/server/middleware/repositoryAuth.ts` (`ContentBoundaryOutcome` return type + doc updates), `src/server/content/types.ts` (`ContentAdapter.getContent`), `src/server/content/index.ts` (`getContent`), `tests/unit/server/content-endpoint.test.ts` (new), `tests/unit/server/authorization.test.ts` (2 tests updated + harness option), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.

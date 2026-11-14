@@ -1,18 +1,22 @@
 /**
- * Task 3.4 — repository authorization boundary for the future content
+ * Task 3.4 / Task 4.2 — repository authorization boundary for the content
  * operation surface (`/api/repos/{owner}/{repo}/content`).
  *
- * The content endpoints do not exist yet (they belong to a later task), so
- * this module establishes the reusable, fail-closed integration pattern:
+ * This module provides the reusable, fail-closed integration pattern that
+ * every content endpoint must go through:
  *
- * - `matchContentRepositoryRef(pathname)` recognizes the future content
- *   route shape without registering a fake endpoint.
- * - `enforceContentBoundary(...)` is the gate future handlers must call
+ * - `matchContentRepositoryRef(pathname)` recognizes the content route
+ *   shape.
+ * - `enforceContentBoundary(...)` is the gate content handlers must call
  *   before performing a content operation: it re-verifies the session,
- *   runs the fresh `authorizeRepository` check, and maps the outcome to
- *   the established error contracts. A request that passes the gate still
- *   receives the standard 404 until the content handlers land, so no
- *   production content functionality is introduced by this task.
+ *   refreshes the user's access token when needed (task 3.5), runs the
+ *   fresh `authorizeRepository` check, and maps the outcome to the
+ *   established error contracts. An authorized request receives
+ *   `{ authorized: true, session }`, where `session` is the exact session
+ *   state the authorization decision was made on (including the refreshed
+ *   access token when one was needed); handlers must build their
+ *   authenticated client from that credential rather than re-reading the
+ *   stored session, which may still hold a pre-refresh token.
  *
  * The boundary runs AFTER the centralized CSRF boundary (task 3.3) for
  * state-changing requests and never substitutes for it: CSRF proves the
@@ -37,6 +41,7 @@ import { authorizeRepository } from '../auth/authorization.js';
 import type { RequiredRepoAccess } from '../auth/permissions.js';
 import { AuthError } from '../auth/types.js';
 import type { AuthRouteDeps } from '../auth/routes.js';
+import type { StoredSession } from '../session/types.js';
 import { sendJsonError } from './errorHandling.js';
 import type { Logger } from './logging.js';
 
@@ -67,12 +72,27 @@ export function matchContentRepositoryRef(pathname: string): ContentRepositoryRe
 }
 
 /**
- * Enforce repository authorization for a future content operation.
+ * The outcome of a content-boundary check.
  *
- * Returns `true` when the request is authorized to proceed (the caller then
- * responds per its own route rules — today that is the standard 404 because
- * no content handler is registered yet). Returns `false` after writing a
- * safe error response; the caller must not write anything else.
+ * When the request is authorized, the result carries the exact session
+ * state the authorization decision was made on — including the refreshed
+ * access token produced by the task 3.5 refresh step when one was needed.
+ * Content handlers must build their authenticated client from that
+ * credential, never from a fresh re-read of the stored session (which may
+ * still hold the pre-refresh token) and never from another user's token.
+ * When the request is denied, the boundary has already written the safe
+ * error response; the caller must not write anything else.
+ */
+export type ContentBoundaryOutcome =
+  | { readonly authorized: true; readonly session: StoredSession }
+  | { readonly authorized: false };
+
+/**
+ * Enforce repository authorization for a content operation.
+ *
+ * Returns an authorized outcome carrying the session state used for the
+ * decision when the request may proceed. Otherwise it writes a safe error
+ * response and returns `{ authorized: false }`.
  */
 export async function enforceContentBoundary(
   req: IncomingMessage,
@@ -81,18 +101,18 @@ export async function enforceContentBoundary(
   requiredAccess: RequiredRepoAccess,
   deps: AuthRouteDeps,
   logger: Logger,
-): Promise<boolean> {
+): Promise<ContentBoundaryOutcome> {
   // 1) Session gate: same lookup semantics as repository discovery. When
   //    session storage is unavailable no authenticated session can exist,
   //    so the boundary fails closed with 401.
   if (deps.session === null) {
     sendJsonError(res, errorDetail('UNAUTHORIZED'));
-    return false;
+    return { authorized: false };
   }
   const sessionId = parseSessionCookie(req.headers.cookie);
   if (sessionId === null) {
     sendJsonError(res, errorDetail('UNAUTHORIZED'));
-    return false;
+    return { authorized: false };
   }
   let lookup;
   try {
@@ -100,11 +120,11 @@ export async function enforceContentBoundary(
   } catch {
     logger.error({ event: 'content_boundary_session_error' });
     sendJsonError(res, errorDetail('INTERNAL_ERROR'));
-    return false;
+    return { authorized: false };
   }
   if (lookup.status !== 'found') {
     sendJsonError(res, errorDetail('UNAUTHORIZED'));
-    return false;
+    return { authorized: false };
   }
   const session = lookup.session;
 
@@ -118,15 +138,15 @@ export async function enforceContentBoundary(
     const token = await deps.refresh.getValidAccessToken(session.sessionId);
     if (token.status === 'rate_limited') {
       sendJsonError(res, errorDetail('RATE_LIMITED'));
-      return false;
+      return { authorized: false };
     }
     if (token.status === 'upstream_unavailable') {
       sendJsonError(res, errorDetail('GITHUB_UNAVAILABLE'));
-      return false;
+      return { authorized: false };
     }
     if (token.status !== 'valid') {
       sendJsonError(res, errorDetail('UNAUTHORIZED'));
-      return false;
+      return { authorized: false };
     }
     sessionForAuthorization = {
       ...session,
@@ -153,13 +173,16 @@ export async function enforceContentBoundary(
         deps.session.storage.deleteSession(session.sessionId);
         deps.logger.warn({ event: 'session_invalidated', reason: 'github_401' });
         sendJsonError(res, errorDetail('UNAUTHORIZED'));
-        return false;
+        return { authorized: false };
       }
       logger.warn({ event: 'content_boundary_denied', access: requiredAccess });
       sendJsonError(res, errorDetail('REPO_NOT_ALLOWED'));
-      return false;
+      return { authorized: false };
     }
-    return true;
+    // The authorized outcome carries the exact session state (including the
+    // refreshed access token) the decision was made on, so handlers can
+    // build their client without re-reading potentially stale storage.
+    return { authorized: true, session: sessionForAuthorization };
   } catch (err) {
     if (err instanceof AuthError) {
       logger.warn({ event: 'content_boundary_upstream_error', code: err.code });
@@ -169,19 +192,19 @@ export async function enforceContentBoundary(
         deps.session.storage.deleteSession(session.sessionId);
         deps.logger.warn({ event: 'session_invalidated', reason: 'github_401' });
         sendJsonError(res, errorDetail('UNAUTHORIZED'));
-        return false;
+        return { authorized: false };
       }
       if (err.code === 'RATE_LIMITED') {
         sendJsonError(res, errorDetail('RATE_LIMITED'));
-        return false;
+        return { authorized: false };
       }
       if (err.code === 'GITHUB_UNAVAILABLE') {
         sendJsonError(res, errorDetail('GITHUB_UNAVAILABLE'));
-        return false;
+        return { authorized: false };
       }
     }
     logger.error({ event: 'content_boundary_unexpected' });
     sendJsonError(res, errorDetail('INTERNAL_ERROR'));
-    return false;
+    return { authorized: false };
   }
 }

@@ -62,6 +62,7 @@ import {
   shaConflictDetail,
 } from '../../shared/errors.js';
 import type {
+  ContentResult,
   DirectoryChild,
   DirectoryListing,
   FileContent,
@@ -379,6 +380,85 @@ export function createContentAdapter(deps: ContentAdapterDeps): ContentAdapter {
     return null;
   };
 
+  /**
+   * Task 4.2 — read a single path with ONE upstream Contents API call: an
+   * array response is a directory listing, a well-formed file object is
+   * file content. This is the dispatch the `GET /content` endpoint uses so
+   * that a nonempty path may be either a file or a directory without making
+   * a second request. Malformed shapes (unknown types, symlinks, single
+   * directory objects, unparseable base64) fail closed with
+   * `INTERNAL_ERROR` rather than guessing; a missing path surfaces as
+   * `FILE_NOT_FOUND` from the shared upstream mapping, and permission
+   * errors never masquerade as missing content (403 → `REPO_NOT_ALLOWED`).
+   *
+   * Path validation uses the `directory` kind so both the empty path and
+   * any structurally valid relative path (file- or directory-looking)
+   * pass; the shared validator still rejects absolute paths, backslashes,
+   * control characters, and traversal outside the content root before any
+   * request is sent.
+   */
+  const getContent = async (
+    owner: string,
+    repo: string,
+    path: string,
+  ): Promise<ContentResult> => {
+    const refError = validateRepoRef(owner, repo);
+    if (refError !== null) {
+      throw refError;
+    }
+    const validation = validateContentPath(contentRoot, path, 'directory');
+    if (!validation.ok) {
+      throw new ContentAdapterError(validation.error);
+    }
+
+    let response;
+    try {
+      response = await client.rest.repos.getContent({
+        owner,
+        repo,
+        path: validation.repositoryPath,
+      });
+    } catch (err) {
+      throw upstreamError(err);
+    }
+
+    const data = response.data;
+    if (Array.isArray(data)) {
+      const children: DirectoryChild[] = [];
+      for (const entry of data) {
+        children.push(parseDirectoryEntry(entry));
+      }
+      return {
+        type: 'directory',
+        path: validation.relativePath,
+        children,
+      };
+    }
+    if (typeof data !== 'object' || data === null) {
+      throw unexpected();
+    }
+    const file = data as Record<string, unknown>;
+    if (
+      file.type !== 'file' ||
+      !isBlobSha(file.sha) ||
+      !isNonNegativeNumber(file.size)
+    ) {
+      // A symlink, a bare directory object, or any other shape is not a
+      // file read: refuse rather than guess (consistent with readContent).
+      throw unexpected();
+    }
+    if (file.encoding !== 'base64' || typeof file.content !== 'string') {
+      throw unexpected();
+    }
+    return {
+      type: 'file',
+      path: validation.relativePath,
+      content: decodeContent(file.content),
+      sha: file.sha,
+      size: file.size,
+    };
+  };
+
   const listContent = async (
     owner: string,
     repo: string,
@@ -628,5 +708,12 @@ export function createContentAdapter(deps: ContentAdapterDeps): ContentAdapter {
     return { path: validation.relativePath, sha };
   };
 
-  return { contentRoot, listContent, readContent, createContent, updateContent };
+  return {
+    contentRoot,
+    getContent,
+    listContent,
+    readContent,
+    createContent,
+    updateContent,
+  };
 }

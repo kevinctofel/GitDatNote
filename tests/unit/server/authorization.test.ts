@@ -38,6 +38,7 @@ import { AuthError } from '../../../src/server/auth/types.js';
 import {
   matchContentRepositoryRef,
 } from '../../../src/server/middleware/repositoryAuth.js';
+import type { ContentClient } from '../../../src/server/content/types.js';
 import type { StoredSession } from '../../../src/server/session/types.js';
 
 /* ------------------------------------------------------------------ */
@@ -579,7 +580,40 @@ function allLogs(): string[] {
 
 const BASE_NOW = 1_750_000_000_000;
 
-async function createHarness(): Promise<Harness> {
+/**
+ * A mock `AppOptions.contentClientFactory` for tests where an authorized
+ * GET /content request reaches the Task 4.2 handler: it records the access
+ * token the handler used and serves a canned upstream payload, so no real
+ * GitHub client is ever constructed.
+ */
+function mockContentFactory(
+  rootEntries: unknown[] = [],
+): {
+  factory: (accessToken: string) => ContentClient;
+  tokens: string[];
+} {
+  const tokens: string[] = [];
+  const factory = (accessToken: string): ContentClient => {
+    tokens.push(accessToken);
+    return {
+      rest: {
+        repos: {
+          async getContent(): Promise<{ data: unknown }> {
+            return { data: rootEntries };
+          },
+          async createOrUpdateFileContents(): Promise<{ data: unknown }> {
+            throw new Error('write handler not under test');
+          },
+        },
+      },
+    };
+  };
+  return { factory, tokens };
+}
+
+async function createHarness(
+  opts: { readonly contentClientFactory?: (accessToken: string) => ContentClient } = {},
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'gitdatnote-authz-'));
   const env: Record<string, string | undefined> = {
     GITHUB_APP_CLIENT_ID: CLIENT_ID,
@@ -591,7 +625,7 @@ async function createHarness(): Promise<Harness> {
   const current = BASE_NOW;
   const now = () => current;
   const fetchImpl = vi.fn();
-  const server = createApp({ env, fetchImpl, now });
+  const server = createApp({ env, fetchImpl, now, contentClientFactory: opts.contentClientFactory });
   const port = await listen(server);
   const harness: Harness = { server, base: `http://127.0.0.1:${port}`, fetchImpl, dir };
   harnesses.push(harness);
@@ -784,14 +818,21 @@ describe('future content-operation boundary (integration)', () => {
     await closeHarness(h);
   });
 
-  it('allows an authenticated, authorized read to reach the (not-yet-existing) handler: standard 404', async () => {
-    const h = await createHarness();
+  it('allows an authenticated, authorized read to reach the content handler: content-root listing', async () => {
+    const { factory, tokens } = mockContentFactory([
+      { name: 'index.md', type: 'file', sha: 'a'.repeat(40), size: 3 },
+    ]);
+    const h = await createHarness({ contentClientFactory: factory });
     const cookie = await completeSignin(h);
     const res = await get(h, `/api/repos/${LOGIN}/notes/content`, cookie);
-    // The boundary passed (no 403); no content handler exists yet, so the
-    // established standard 404 is the safe response.
-    expect(res.status).toBe(404);
-    expect(res.code).toBe('FILE_NOT_FOUND');
+    // The boundary passed (no 403) and the Task 4.2 handler answered with
+    // the content-root listing; the client was built from the session token.
+    expect(res.status).toBe(200);
+    const body = res.json as Record<string, unknown>;
+    expect(body.type).toBe('directory');
+    expect(body.path).toBe('');
+    expect(Array.isArray(body.children)).toBe(true);
+    expect(tokens).toEqual([ACCESS_TOKEN]);
     await closeHarness(h);
   });
 
@@ -905,7 +946,10 @@ describe('future content-operation boundary (integration)', () => {
   });
 
   it('does not leak credentials in responses or server logs', async () => {
-    const h = await createHarness();
+    const { factory } = mockContentFactory([
+      { name: 'index.md', type: 'file', sha: 'a'.repeat(40), size: 3 },
+    ]);
+    const h = await createHarness({ contentClientFactory: factory });
     const cookie = await completeSignin(h);
     const denied = await get(h, `/api/repos/${LOGIN}/unlisted/content`, cookie);
     const allowed = await get(h, `/api/repos/${LOGIN}/notes/content`, cookie);

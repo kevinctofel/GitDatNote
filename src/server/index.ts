@@ -55,10 +55,20 @@ import {
   logRequest,
   resolveLogLevel,
 } from './middleware/logging.js';
-import type { LogLevel } from './middleware/logging.js';
+import type { Logger, LogLevel } from './middleware/logging.js';
 import { sendApiNotFound, sendJsonError, sendUnexpectedError } from './middleware/errorHandling.js';
 import { checkCsrf, respondToCsrf } from './middleware/csrf.js';
-import { enforceContentBoundary, matchContentRepositoryRef } from './middleware/repositoryAuth.js';
+import {
+  enforceContentBoundary,
+  matchContentRepositoryRef,
+  type ContentRepositoryRef,
+} from './middleware/repositoryAuth.js';
+import {
+  createAuthenticatedContentClient,
+  createContentAdapter,
+} from './content/index.js';
+import { ContentAdapterError, type ContentClient } from './content/types.js';
+import { DEFAULT_CONTENT_ROOT, type ContentResult } from '../shared/types.js';
 import { errorDetail } from '../shared/errors.js';
 import {
   handleAuthCallback,
@@ -80,6 +90,7 @@ import {
   type SessionConfig,
   type SessionStorage,
 } from './session/index.js';
+import type { StoredSession } from './session/types.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = '127.0.0.1';
@@ -102,6 +113,15 @@ export interface AppOptions {
   readonly fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
   /** Injectable clock (epoch milliseconds) for deterministic tests. */
   readonly now?: () => number;
+  /**
+   * Task 4.2: injectable factory for the authenticated content client of
+   * the read-only content endpoint. Defaults to
+   * `createAuthenticatedContentClient`. Tests inject a factory that
+   * records which access token it receives, proving the handler builds
+   * its client from the authorized-request credential (possibly
+   * refreshed) rather than a fresh session-storage read.
+   */
+  readonly contentClientFactory?: (accessToken: string) => ContentClient;
 }
 
 /**
@@ -162,6 +182,16 @@ export function createApp(options: AppOptions = {}): Server {
     refresh,
     cookieSecure,
   };
+
+  // Task 4.2: the authenticated content client factory for the read-only
+  // content endpoint. The default builds the real Octokit client from the
+  // access token carried by the authorized-boundary outcome (the exact,
+  // possibly refreshed credential of the authorized request — never a
+  // fresh session-storage read); tests may inject a factory that records
+  // the token it receives. One client per operation context, never shared
+  // or cached across requests.
+  const contentClientFactory =
+    options.contentClientFactory ?? createAuthenticatedContentClient;
 
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
     const startedAt = process.hrtime.bigint();
@@ -235,10 +265,12 @@ export function createApp(options: AppOptions = {}): Server {
         const contentRef = matchContentRepositoryRef(pathname);
         if (contentRef !== null) {
           void enforceContentBoundary(req, res, contentRef, 'write', authDeps, logger).then(
-            (authorized: boolean) => {
-              // Authorized: no content handler is registered yet (a later
-              // task), so the standard 404 is the safe response today.
-              if (authorized) sendApiNotFound(res);
+            (outcome) => {
+              // Authorized: no state-changing content handler is registered
+              // yet (a later task), so the standard 404 is the safe
+              // response today. Denied outcomes already have their safe
+              // error response written by the boundary.
+              if (outcome.authorized) sendApiNotFound(res);
             },
           ).catch((err: unknown) => {
             sendUnexpectedError(res, logger, err);
@@ -252,23 +284,52 @@ export function createApp(options: AppOptions = {}): Server {
         return;
       }
 
-      // Task 3.4: fail-closed authorization boundary for the future
-      // content-operation surface (/api/repos/{owner}/{repo}/content). The
-      // content handlers do not exist yet (a later task), so today the only
-      // reachable outcomes are safe errors — or the standard 404 for an
-      // authenticated, authorized request. This boundary runs after the
-      // CSRF boundary above and never substitutes for it: CSRF proves the
-      // request came from the authenticated browser session; authorization
-      // proves the session is permitted on the target repository.
+      // Task 3.4 / 4.2: fail-closed authorization boundary for the
+      // content-operation surface (/api/repos/{owner}/{repo}/content). This
+      // boundary runs after the CSRF boundary above and never substitutes
+      // for it: CSRF proves the request came from the authenticated browser
+      // session; authorization proves the session is permitted on the
+      // target repository. The boundary outcome carries the exact session
+      // state (including any refreshed access token) the authorization
+      // decision was made on.
       const contentRef = matchContentRepositoryRef(pathname);
       if (contentRef !== null) {
+        // Task 4.2 (post-review correction): GET on exactly
+        // /api/repos/{owner}/{repo}/content is the read-only content
+        // endpoint (the requested path arrives in the `path` query
+        // parameter, relative to the content root). Authorization
+        // semantics are restored to the original Task 3.4 rule: every
+        // GET and HEAD request on the content surface requires
+        // repository read access; POST, PUT, DELETE, and other
+        // state-changing operations require write access. Only the exact
+        // GET endpoint invokes the content-read handler; GET subpaths
+        // beneath /content have no registered handler yet (later tasks)
+        // and, after passing read authorization, receive the standard
+        // 404 without constructing a content client.
+        const isContentRead =
+          method === 'GET' &&
+          pathname === `/api/repos/${contentRef.owner}/${contentRef.repo}/content`;
         const requiredAccess: 'read' | 'write' =
           method === 'GET' || method === 'HEAD' ? 'read' : 'write';
         void enforceContentBoundary(req, res, contentRef, requiredAccess, authDeps, logger).then(
-          (authorized: boolean) => {
-            // Authorized: no content handler is registered yet (a later
-            // task), so the standard 404 is the safe response today.
-            if (authorized) sendApiNotFound(res);
+          (outcome) => {
+            if (!outcome.authorized) {
+              // The boundary has already written the safe error response.
+              return;
+            }
+            if (isContentRead) {
+              void handleContentRead(req, res, contentRef, outcome.session, {
+                authDeps,
+                logger,
+                contentClientFactory,
+              }).catch((err: unknown) => {
+                sendUnexpectedError(res, logger, err);
+              });
+              return;
+            }
+            // Authorized, but no handler is registered for this route: the
+            // standard 404 remains the safe response.
+            sendApiNotFound(res);
           },
         ).catch((err: unknown) => {
           sendUnexpectedError(res, logger, err);
@@ -322,6 +383,84 @@ export function createApp(options: AppOptions = {}): Server {
     session?.storage.close();
   });
   return server;
+}
+
+/**
+ * Task 4.2 — handler for `GET /api/repos/{owner}/{repo}/content`.
+ *
+ * Called only after `enforceContentBoundary` returned an authorized
+ * outcome, so `session` is the exact session state (including the
+ * refreshed access token when one was needed) the authorization decision
+ * was made on. The authenticated content client is built from that token —
+ * never from a fresh session-storage read (which may still hold the
+ * pre-refresh token) and never from another user's credential — and the
+ * Task 4.1 content adapter performs the single upstream Contents API
+ * request. A missing or empty `path` query parameter means the content
+ * root itself; an invalid path is rejected by the shared validator before
+ * any request is sent.
+ *
+ * Error contract: adapter failures are the shared safe `ErrorDetail`
+ * envelope (no Octokit text, tokens, or file content). A definitive GitHub
+ * 401 (user credential revoked) invalidates the session through the
+ * established session-storage mechanism — the same behavior as repository
+ * discovery and the boundary. Ordinary 403 permission denials and 429 rate
+ * limits never invalidate the session.
+ *
+ * File content is returned exactly as stored (raw UTF-8 Markdown); no
+ * rendering or sanitization happens here (web preview layer's
+ * responsibility).
+ */
+async function handleContentRead(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ref: ContentRepositoryRef,
+  session: StoredSession,
+  deps: {
+    readonly authDeps: AuthRouteDeps;
+    readonly logger: Logger;
+    readonly contentClientFactory: (accessToken: string) => ContentClient;
+  },
+): Promise<void> {
+  const { authDeps, logger, contentClientFactory } = deps;
+
+  // The `path` query parameter is relative to the repository's content
+  // root. The dispatcher has already parsed the request target safely
+  // (unparseable targets answered 422 before dispatch), so the query can
+  // be read the same way.
+  const query = new URLSearchParams(
+    new URL(req.url ?? '/', 'http://localhost').search,
+  );
+  const rawPath = query.get('path');
+  const relativePath = rawPath === null ? '' : rawPath;
+
+  const client = contentClientFactory(session.credentials.accessToken);
+  const adapter = createContentAdapter({ client, contentRoot: DEFAULT_CONTENT_ROOT });
+
+  let result: ContentResult;
+  try {
+    result = await adapter.getContent(ref.owner, ref.repo, relativePath);
+  } catch (err) {
+    if (err instanceof ContentAdapterError) {
+      if (err.detail.code === 'UNAUTHORIZED') {
+        // A definitive GitHub 401 proves the stored user credential is
+        // invalid or revoked: invalidate the session through the
+        // established session-storage mechanism (same as repository
+        // discovery and the boundary). 403 and 429 do not invalidate.
+        if (authDeps.session !== null) {
+          authDeps.session.storage.deleteSession(session.sessionId);
+        }
+        logger.warn({ event: 'session_invalidated', reason: 'github_401' });
+      }
+      // The adapter's ErrorDetail is already the shared safe envelope.
+      sendJsonError(res, err.detail);
+      return;
+    }
+    sendUnexpectedError(res, logger, err);
+    return;
+  }
+
+  res.writeHead(200, JSON_HEADERS);
+  res.end(JSON.stringify(result));
 }
 
 /**
