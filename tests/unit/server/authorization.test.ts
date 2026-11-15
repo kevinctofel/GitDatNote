@@ -857,13 +857,15 @@ describe('future content-operation boundary (integration)', () => {
     await closeHarness(h);
   });
 
-  it('allows an authenticated, authorized, CSRF-validated write to reach the standard 404', async () => {
+  it('lets an authenticated, authorized, CSRF-validated write reach the Task 4.3 handler (empty body is 422 PATH_INVALID)', async () => {
     const h = await createHarness();
     const cookie = await completeSignin(h);
     const csrf = await csrfTokenFor(h, cookie);
     const res = await post(h, `/api/repos/${LOGIN}/notes/content`, cookie, csrf);
-    expect(res.status).toBe(404);
-    expect(res.code).toBe('FILE_NOT_FOUND');
+    // The boundary passed (no 401/403) and the Task 4.3 handler answered:
+    // the empty JSON body is rejected before any content client is built.
+    expect(res.status).toBe(422);
+    expect(res.code).toBe('PATH_INVALID');
     await closeHarness(h);
   });
 

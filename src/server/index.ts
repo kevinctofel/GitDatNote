@@ -258,19 +258,40 @@ export function createApp(options: AppOptions = {}): Server {
           handleLogout(res, authDeps, csrf.sessionId);
           return;
         }
-        // Task 3.4: state-changing content operations pass the CSRF boundary
-        // above, then the repository authorization boundary with write
-        // access — authorization never substitutes for CSRF, and CSRF never
-        // substitutes for authorization.
+        // Task 3.4 / 4.3: state-changing content operations pass the CSRF
+        // boundary above, then the repository authorization boundary with
+        // write access — authorization never substitutes for CSRF, and CSRF
+        // never substitutes for authorization.
         const contentRef = matchContentRepositoryRef(pathname);
         if (contentRef !== null) {
+          // Task 4.3: POST on exactly /api/repos/{owner}/{repo}/content is
+          // the file-creation endpoint. Only that exact method+path invokes
+          // the create handler; every other state-changing request on the
+          // content surface has no registered handler yet (later tasks) and
+          // receives the standard 404 after passing write authorization.
+          const isContentCreate =
+            method === 'POST' &&
+            pathname === `/api/repos/${contentRef.owner}/${contentRef.repo}/content`;
           void enforceContentBoundary(req, res, contentRef, 'write', authDeps, logger).then(
             (outcome) => {
+              if (!outcome.authorized) {
+                // The boundary has already written the safe error response.
+                return;
+              }
+              if (isContentCreate) {
+                void handleContentCreate(req, res, contentRef, outcome.session, {
+                  authDeps,
+                  logger,
+                  contentClientFactory,
+                }).catch((err: unknown) => {
+                  sendUnexpectedError(res, logger, err);
+                });
+                return;
+              }
               // Authorized: no state-changing content handler is registered
               // yet (a later task), so the standard 404 is the safe
-              // response today. Denied outcomes already have their safe
-              // error response written by the boundary.
-              if (outcome.authorized) sendApiNotFound(res);
+              // response today.
+              sendApiNotFound(res);
             },
           ).catch((err: unknown) => {
             sendUnexpectedError(res, logger, err);
@@ -460,6 +481,226 @@ async function handleContentRead(
   }
 
   res.writeHead(200, JSON_HEADERS);
+  res.end(JSON.stringify(result));
+}
+
+/**
+ * Task 4.3 — hard cap for a file-creation request body. The 1 MB content
+ * limit can expand to ~2 MB in a JSON string in the worst case (every byte
+ * escaped: quotes, backslashes, newlines), plus headroom for the optional
+ * commit message and JSON structure. Larger bodies are rejected with the
+ * safe `CONTENT_TOO_LARGE` envelope before any JSON parsing or GitHub
+ * request.
+ */
+const CREATE_BODY_MAX_BYTES = 3 * 1024 * 1024;
+
+/**
+ * Collect the full request body as UTF-8 text, enforcing
+ * `CREATE_BODY_MAX_BYTES`. The promise settles exactly once: on a complete
+ * body ('end' with every declared byte received), on 'too_large' as soon
+ * as the cap is exceeded (buffering stops, so an oversized body can never
+ * be retained in memory), or on a premature close of the upload —
+ * 'aborted', 'error', or a 'close' that arrived without a complete 'end'
+ * (including a cleanly closed body that delivered fewer bytes than its
+ * declared `Content-Length`, which is an incomplete upload and must never
+ * be parsed, let alone turned into content). The caller owns the socket
+ * afterwards (the size-cap path drops it once the error response has been
+ * written; the aborted paths no longer own a socket to write to).
+ *
+ * Only this reader's own listeners are removed when it settles — no
+ * other listener on the request is ever touched — and its 'error'
+ * listener is deliberately left attached for the stream's lifetime so a
+ * late stream error can never surface as an uncaught event.
+ */
+function readCreateBody(
+  req: IncomingMessage,
+): Promise<{ ok: true; text: string } | { ok: false; reason: 'too_large' | 'aborted' }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let size = 0;
+    const chunks: Buffer[] = [];
+    const detach = (): void => {
+      // Remove only this reader's own listeners. The 'error' listener is
+      // intentionally left attached for the stream's lifetime (a late
+      // stream error then stays handled instead of becoming an uncaught
+      // event).
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('aborted', onAborted);
+      req.off('close', onClose);
+    };
+    const finish = (
+      result: { ok: true; text: string } | { ok: false; reason: 'too_large' | 'aborted' },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      detach();
+      resolve(result);
+    };
+    const onData = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size > CREATE_BODY_MAX_BYTES) {
+        finish({ ok: false, reason: 'too_large' });
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = (): void => {
+      // An 'end' with fewer bytes than the declared Content-Length is an
+      // incomplete upload: the body was cut short, so it is never parsed.
+      const declared = req.headers['content-length'];
+      if (declared !== undefined && size < Number(declared)) {
+        finish({ ok: false, reason: 'aborted' });
+        return;
+      }
+      finish({ ok: true, text: Buffer.concat(chunks).toString('utf8') });
+    };
+    const onAborted = (): void => {
+      finish({ ok: false, reason: 'aborted' });
+    };
+    const onError = (): void => {
+      finish({ ok: false, reason: 'aborted' });
+    };
+    const onClose = (): void => {
+      // Backstop for a premature teardown: the stream closed without a
+      // complete 'end', so the upload is incomplete.
+      finish({ ok: false, reason: 'aborted' });
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('aborted', onAborted);
+    req.on('error', onError);
+    req.on('close', onClose);
+  });
+}
+
+/**
+ * Task 4.3 — handler for `POST /api/repos/{owner}/{repo}/content`
+ * (file creation).
+ *
+ * Called only after the centralized CSRF gate and the Task 3.4/3.5 write
+ * boundary returned an authorized outcome, so `session` is the exact
+ * session state (including the refreshed access token when one was
+ * needed) the authorization decision was made on. Request body (JSON):
+ *
+ *   { "path": "2026/hello-world.md", "content": "# Hello", "message": "..." }
+ *
+ * `path` is relative to the configured content root; `message` is
+ * optional (the adapter defaults it to `Create {path}`). Success is 201
+ * with the created file's `{ path, sha }`.
+ *
+ * The handler itself performs only request-body handling: path and
+ * content validation, the existence pre-check, and the upstream write all
+ * happen inside the Task 4.1 content adapter (`createContent`), which
+ * uses the shared safe error vocabulary. This handler never calls the
+ * GitHub Contents API directly, never fabricates committer metadata
+ * (design decision A-05), and never silently overwrites an existing file.
+ *
+ * Body-shape failures (unparseable JSON, a non-object payload, a
+ * missing/non-string `path`/`content`, or a present non-string `message` —
+ * including explicit null) are rejected with 422 `PATH_INVALID` before any
+ * client is constructed — the shared vocabulary has no separate
+ * invalid-body code, and `PATH_INVALID` is the established client-input
+ * error. An aborted or incomplete upload settles the body reader as
+ * 'aborted' and is answered with nothing (the socket is already gone) —
+ * partial JSON is never parsed, and no upstream write is attempted. A body
+ * over the size cap is rejected with 422 `CONTENT_TOO_LARGE`. `message` is
+ * optional: accepted only when omitted or a string.
+ *
+ * Error contract mirrors `handleContentRead`: adapter failures are the
+ * shared safe `ErrorDetail` envelope (no Octokit text, tokens, or file
+ * content); a definitive GitHub 401 invalidates the session; 403 and 429
+ * never do.
+ */
+async function handleContentCreate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ref: ContentRepositoryRef,
+  session: StoredSession,
+  deps: {
+    readonly authDeps: AuthRouteDeps;
+    readonly logger: Logger;
+    readonly contentClientFactory: (accessToken: string) => ContentClient;
+  },
+): Promise<void> {
+  const { authDeps, logger, contentClientFactory } = deps;
+
+  const raw = await readCreateBody(req);
+  if (!raw.ok) {
+    if (raw.reason === 'too_large') {
+      // The body exceeded the hard cap: either the content is over the
+      // 1 MB limit, or the (otherwise truncated to 200 chars) commit
+      // message is pathologically large. The shared vocabulary's size
+      // code applies and is sent before any JSON parsing or upstream
+      // request. The excess body keeps streaming, so drop the connection
+      // once this response has been written — it is never buffered or
+      // served further.
+      sendJsonError(res, errorDetail('CONTENT_TOO_LARGE'));
+      res.once('finish', () => req.destroy());
+    }
+    // 'aborted': the client hung up mid-body; the socket is already gone,
+    // so there is nothing to write.
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.text);
+  } catch {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  const fields = payload as Record<string, unknown>;
+  const path = fields.path;
+  const content = fields.content;
+  const message = fields.message;
+  if (typeof path !== 'string' || typeof content !== 'string') {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  // `message` is optional: accepted only when omitted or a string. An
+  // explicit null, number, boolean, array, or object is rejected with the
+  // established client-input error — and, like the other body-shape
+  // failures, no content client is constructed for invalid input.
+  if (message !== undefined && typeof message !== 'string') {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  const commitMessage = message;
+
+  const client = contentClientFactory(session.credentials.accessToken);
+  const adapter = createContentAdapter({ client, contentRoot: DEFAULT_CONTENT_ROOT });
+
+  let result: { path: string; sha: string };
+  try {
+    result = await adapter.createContent(ref.owner, ref.repo, path, content, commitMessage);
+  } catch (err) {
+    if (err instanceof ContentAdapterError) {
+      if (err.detail.code === 'UNAUTHORIZED') {
+        // A definitive GitHub 401 proves the stored user credential is
+        // invalid or revoked: invalidate the session through the
+        // established session-storage mechanism (same as repository
+        // discovery, the boundary, and the read handler). 403 and 429 do
+        // not invalidate.
+        if (authDeps.session !== null) {
+          authDeps.session.storage.deleteSession(session.sessionId);
+        }
+        logger.warn({ event: 'session_invalidated', reason: 'github_401' });
+      }
+      // The adapter's ErrorDetail is already the shared safe envelope.
+      sendJsonError(res, err.detail);
+      return;
+    }
+    sendUnexpectedError(res, logger, err);
+    return;
+  }
+
+  res.writeHead(201, JSON_HEADERS);
   res.end(JSON.stringify(result));
 }
 

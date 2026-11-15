@@ -27,6 +27,7 @@
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -96,6 +97,7 @@ const REPO_READ = {
 const BLOB_SHA = 'a'.repeat(40);
 const DIR_SHA = 'b'.repeat(40);
 const OTHER_SHA = 'c'.repeat(40);
+const NEW_SHA = 'd'.repeat(40);
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -187,6 +189,18 @@ interface ContentFixture {
   readonly headers?: Record<string, string>;
   /** When true, contents requests reject with a network failure. */
   readonly networkFailure?: boolean;
+  /**
+   * Task 4.3: the create-write result. `status` makes the write throw that
+   * HTTP status (e.g. a concurrent create's 409); `data` is returned
+   * verbatim as the write payload (malformed-shape tests); otherwise a
+   * well-formed success payload is returned, carrying `sha` (default
+   * `NEW_SHA`).
+   */
+  readonly create?: {
+    readonly sha?: string;
+    readonly status?: number;
+    readonly data?: unknown;
+  };
 }
 
 interface Harness {
@@ -198,6 +212,12 @@ interface Harness {
   readonly factoryTokens: string[];
   /** Full repository paths requested from the mock content client, in order. */
   readonly requestedPaths: string[];
+  /** Create-write params handed to the mock client, in order. */
+  readonly createdCalls: Array<{
+    path: string;
+    message: string;
+    content: string;
+  }>;
   setContentFixture(fixture: ContentFixture): void;
 }
 
@@ -226,6 +246,11 @@ async function createHarness(): Promise<Harness> {
   const fetchImpl = vi.fn();
   const factoryTokens: string[] = [];
   const requestedPaths: string[] = [];
+  const createdCalls: Array<{
+    path: string;
+    message: string;
+    content: string;
+  }> = [];
   let fixture: ContentFixture = {};
   const contentClientFactory = (accessToken: string): ContentClient => {
     factoryTokens.push(accessToken);
@@ -250,10 +275,28 @@ async function createHarness(): Promise<Harness> {
             }
             return { data: body };
           },
-          async createOrUpdateFileContents(): Promise<{ data: unknown }> {
-            throw new Error(
-              'Task 4.2 is read-only; writes are not expected here',
-            );
+          async createOrUpdateFileContents(params: {
+            owner: string;
+            repo: string;
+            path: string;
+            message: string;
+            content: string;
+          }): Promise<{ data: unknown }> {
+            createdCalls.push({
+              path: params.path,
+              message: params.message,
+              content: params.content,
+            });
+            const create = fixture.create;
+            if (create === undefined) {
+              throw new Error('no create fixture configured for this write');
+            }
+            if (create.status !== undefined) {
+              throw httpError(create.status);
+            }
+            return {
+              data: create.data ?? { content: { sha: create.sha ?? NEW_SHA } },
+            };
           },
         },
       },
@@ -268,6 +311,7 @@ async function createHarness(): Promise<Harness> {
     dir,
     factoryTokens,
     requestedPaths,
+    createdCalls,
     setContentFixture: (f: ContentFixture): void => {
       fixture = f;
     },
@@ -456,6 +500,7 @@ async function post(
   path: string,
   cookie?: string,
   csrf?: string,
+  rawBody: string = '{}',
 ): Promise<{ status: number; body: string; json: unknown; code: string | undefined }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -465,7 +510,7 @@ async function post(
   const res = await fetch(h.base + path, {
     method: 'POST',
     headers,
-    body: '{}',
+    body: rawBody,
   });
   const body = await res.text();
   let json: unknown = null;
@@ -497,6 +542,99 @@ function codeOf(json: unknown): string | undefined {
 
 /** Standard content-endpoint URL for the writable `notes` repository. */
 const CONTENT_URL = `/api/repos/${LOGIN}/notes/content`;
+
+/**
+ * Task 4.3 regression helper: a raw-socket create upload that never
+ * completes. The request declares `declared` body bytes, `partial` of
+ * them are sent, and — coordinated through the socket's own write
+ * callback, so the server has observed the partial body first (no
+ * arbitrary sleep) — the socket is then either destroyed (an aborted
+ * upload) or cleanly ended (an incomplete body).
+ *
+ * The helper resolves on the client-side terminal event for that fate:
+ * `'close'` after a local destroy, or `'finish'` once the FIN has been
+ * flushed to the OS for a clean half-close. It does not wait for the
+ * server to close the connection, because a half-closed upload the
+ * server is answering with nothing legitimately leaves the socket
+ * open; the incomplete body falls short of the declared
+ * `Content-Length`, so the reader can never settle `'ok'` — the
+ * no-client-construction / no-upstream-write assertions are valid at
+ * any point after this resolves, with no server round trip required.
+ *
+ * Socket cleanup (removing only its own listeners and destroying the
+ * socket) runs on both success and failure; a finite 2 s cap rejects
+ * with a descriptive error if the socket never settles, so a
+ * server-side regression can never produce a false pass.
+ */
+async function incompleteUpload(
+  h: Harness,
+  cookie: string,
+  csrf: string,
+  declared: number,
+  partial: Buffer,
+  abort: boolean,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const port = Number(new URL(h.base).port);
+    const socket = createConnection(port, '127.0.0.1');
+    let done = false;
+    const finish = (err?: Error): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.removeAllListeners();
+      socket.destroy();
+      if (err !== undefined) reject(err);
+      else resolve();
+    };
+    // A hung socket must fail the test, never silently pass.
+    const timer = setTimeout(
+      () => {
+        finish(
+          new Error(
+            'incompleteUpload timed out after 2000 ms: the upload socket never settled',
+          ),
+        );
+      },
+      2000,
+    );
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      // The server dropping an aborted upload is expected client-side
+      // behavior; anything else is a real failure.
+      finish(err.code === 'ECONNRESET' || err.code === 'EPIPE' ? undefined : err);
+    });
+    if (abort) {
+      socket.once('close', () => {
+        finish();
+      });
+    } else {
+      // 'finish' fires once the FIN has been flushed to the OS — the
+      // deterministic terminal event for a clean half-close.
+      socket.once('finish', () => {
+        finish();
+      });
+    }
+    socket.write(
+      `POST /api/repos/${LOGIN}/notes/content HTTP/1.1\r\n` +
+        `Host: 127.0.0.1:${port}\r\n` +
+        'Connection: close\r\n' +
+        'Content-Type: application/json\r\n' +
+        `Content-Length: ${declared}\r\n` +
+        `Cookie: ${cookie}\r\n` +
+        `X-CSRF-Token: ${csrf}\r\n` +
+        '\r\n',
+    );
+    // Deterministic handoff: the write callback fires once `partial`
+    // (and everything written before it, in order) has been flushed to
+    // the OS, so the server has observed the partial body before the
+    // socket's fate is decided.
+    socket.write(partial, () => {
+      if (done) return;
+      if (abort) socket.destroy();
+      else socket.end();
+    });
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* 1) Directory listings                                              */
@@ -888,7 +1026,7 @@ describe('content endpoint — upstream error mapping (integration)', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* 5) Malformed upstream data fails closed                             */
+/* 6) Malformed upstream data fails closed                             */
 /* ------------------------------------------------------------------ */
 
 describe('content endpoint — malformed upstream data fails closed (integration)', () => {
@@ -1027,7 +1165,455 @@ describe('content endpoint — malformed upstream data fails closed (integration
 });
 
 /* ------------------------------------------------------------------ */
-/* 6) The authorization boundary is reused, not reimplemented          */
+/* 5) File creation (Task 4.3)                                         */
+/* ------------------------------------------------------------------ */
+
+describe('content endpoint — file creation (integration)', () => {
+  const createBody = (payload: Record<string, unknown>): string =>
+    JSON.stringify(payload);
+
+  it('creates a new file: 201 with the relative path and the new blob SHA', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, create: {} });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: '2026/hello-world.md', content: '# Hello world' }),
+    );
+    expect(res.status).toBe(201);
+    expect(res.json).toEqual({ path: '2026/hello-world.md', sha: NEW_SHA });
+    // One client, built from the session token, for one pre-check + write.
+    expect(h.factoryTokens).toEqual([ACCESS_TOKEN]);
+    expect(h.requestedPaths).toEqual(['src/posts/2026/hello-world.md']);
+    expect(h.createdCalls).toEqual([
+      {
+        path: 'src/posts/2026/hello-world.md',
+        // Default commit message: `Create {path}`.
+        message: 'Create 2026/hello-world.md',
+        content: Buffer.from('# Hello world', 'utf8').toString('base64'),
+      },
+    ]);
+    await closeHarness(h);
+  });
+
+  it('uses an explicit commit message, normalized (CRLF runs to space, trimmed)', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, create: {} });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({
+        path: 'note.md',
+        content: 'body',
+        message: '  Add a note\r\nnext line  ',
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect(h.createdCalls[0].message).toBe('Add a note next line');
+    await closeHarness(h);
+  });
+
+  it('refuses to overwrite an existing file with 409 FILE_EXISTS (no write sent)', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({
+      data: { 'src/posts/note.md': fileFixture('# existing') },
+    });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'note.md', content: '# new' }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.code).toBe('FILE_EXISTS');
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('refuses to create where a directory exists with 409 FILE_EXISTS (no write sent)', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({
+      data: { 'src/posts/2026': [dirEntry('a.md', 'file', BLOB_SHA, 1)] },
+    });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: '2026', content: 'x' }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.code).toBe('FILE_EXISTS');
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('maps a concurrent-create 409 from the write to 409 FILE_EXISTS', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, create: { status: 409 } });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'note.md', content: 'x' }),
+    );
+    expect(res.status).toBe(409);
+    expect(res.code).toBe('FILE_EXISTS');
+    // The write was attempted (the pre-check saw no existing entry).
+    expect(h.createdCalls.length).toBe(1);
+    await closeHarness(h);
+  });
+
+  it('rejects invalid paths with 422 PATH_INVALID before any upstream request', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, create: {} });
+    for (const bad of ['../escape.md', '/absolute.md', '2026\\secret.md', '']) {
+      const res = await post(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        createBody({ path: bad, content: 'x' }),
+      );
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('PATH_INVALID');
+    }
+    expect(h.requestedPaths).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('rejects content over 1 MB with 422 CONTENT_TOO_LARGE, but accepts exactly 1 MB', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, create: {} });
+    const tooLarge = 'x'.repeat(1024 * 1024 + 1);
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'big.md', content: tooLarge }),
+    );
+    expect(res.status).toBe(422);
+    expect(res.code).toBe('CONTENT_TOO_LARGE');
+    const exact = 'x'.repeat(1024 * 1024);
+    const ok = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'max.md', content: exact }),
+    );
+    expect(ok.status).toBe(201);
+    await closeHarness(h);
+  });
+
+  it('rejects malformed bodies with 422 PATH_INVALID and never constructs a content client', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    for (const raw of [
+      'not json',
+      '["array"]',
+      'null',
+      '{"path": 7, "content": "x"}',
+      '{"content": "x"}',
+      '{}',
+    ]) {
+      const res = await post(h, CONTENT_URL, cookie, csrf, raw);
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('PATH_INVALID');
+    }
+    expect(h.factoryTokens).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('rejects present non-string message values (null, number, boolean, array, object) with 422 PATH_INVALID and never constructs a content client', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    for (const message of [null, 7, true, ['add'], { note: 'add' }]) {
+      const res = await post(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        createBody({ path: 'n.md', content: 'x', message }),
+      );
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('PATH_INVALID');
+    }
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    // An omitted message is still accepted.
+    h.setContentFixture({ data: {}, create: {} });
+    const ok = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(ok.status).toBe(201);
+    expect(h.factoryTokens.length).toBe(1);
+    await closeHarness(h);
+  });
+
+  it('settles an aborted upload (client destroys the socket mid-body) without creating content or crashing the server', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    const partial = Buffer.from('{"path": "n.md", "content": "tr');
+    await incompleteUpload(h, cookie, csrf, 4096, partial, true);
+    // The incomplete body never reaches the adapter: no client was
+    // constructed and no upstream write was attempted.
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    // The server is still alive: a follow-up create succeeds.
+    h.setContentFixture({ data: {}, create: {} });
+    const ok = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(ok.status).toBe(201);
+    await closeHarness(h);
+  });
+
+  it('never parses a body cleanly closed with fewer bytes than its declared Content-Length', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    const partial = Buffer.from('{"path": "n.md", "content": "tr');
+    await incompleteUpload(h, cookie, csrf, 4096, partial, false);
+    // Partial JSON is never parsed into content, and no client is built.
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    // The server stayed up and answers a complete create normally.
+    h.setContentFixture({ data: {}, create: {} });
+    const ok = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(ok.status).toBe(201);
+    await closeHarness(h);
+  });
+
+  it('rejects a body over the size cap with 422 CONTENT_TOO_LARGE and never constructs a content client', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    const raw =
+      '{"path": "big.md", "content": "' + 'x'.repeat(3 * 1024 * 1024) + '"}';
+    const res = await post(h, CONTENT_URL, cookie, csrf, raw);
+    expect(res.status).toBe(422);
+    expect(res.code).toBe('CONTENT_TOO_LARGE');
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('maps upstream errors from the pre-check and invalidates the session only on 401', async () => {
+    const cases: Array<{
+      fixture: ContentFixture;
+      status: number;
+      code: string;
+    }> = [
+      { fixture: { data: {}, status: 403 }, status: 403, code: 'REPO_NOT_ALLOWED' },
+      {
+        fixture: { data: {}, status: 429, headers: { 'Retry-After': '5' } },
+        status: 429,
+        code: 'RATE_LIMITED',
+      },
+      { fixture: { data: {}, status: 502 }, status: 502, code: 'GITHUB_UNAVAILABLE' },
+      {
+        fixture: { data: {}, networkFailure: true },
+        status: 502,
+        code: 'GITHUB_UNAVAILABLE',
+      },
+    ];
+    for (const c of cases) {
+      const h = await createHarness();
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture(c.fixture);
+      const res = await post(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        createBody({ path: 'n.md', content: 'x' }),
+      );
+      expect(res.status).toBe(c.status);
+      expect(res.code).toBe(c.code);
+      // 403/429/5xx/network never invalidate: a follow-up create succeeds.
+      h.setContentFixture({ data: {}, create: {} });
+      const followup = await post(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        createBody({ path: 'n.md', content: 'x' }),
+      );
+      expect(followup.status).toBe(201);
+      await closeHarness(h);
+    }
+  });
+
+  it('maps a definitive GitHub 401 to UNAUTHORIZED and invalidates the session', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ data: {}, status: 401 });
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.code).toBe('UNAUTHORIZED');
+    // Session invalidated: a follow-up create is unauthenticated.
+    const followup = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(followup.status).toBe(401);
+    expect(followup.code).toBe('UNAUTHORIZED');
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('fails closed on a malformed write payload with 500 INTERNAL_ERROR', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    for (const data of [{}, { content: {} }, { content: { sha: 'not-a-sha' } }]) {
+      h.setContentFixture({ data: {}, create: { data } });
+      const res = await post(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        createBody({ path: 'n.md', content: 'x' }),
+      );
+      expect(res.status).toBe(500);
+      expect(res.code).toBe('INTERNAL_ERROR');
+    }
+    // Each attempt reached the write (and only the write).
+    expect(h.createdCalls.length).toBe(3);
+    await closeHarness(h);
+  });
+
+  it('denies create on boundary failure without constructing a content client', async () => {
+    // Unauthenticated.
+    let h = await createHarness();
+    let res = await post(
+      h,
+      CONTENT_URL,
+      undefined,
+      undefined,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.code).toBe('UNAUTHORIZED');
+    expect(h.factoryTokens).toEqual([]);
+    await closeHarness(h);
+
+    // Authenticated but no CSRF token.
+    h = await createHarness();
+    const cookie = await completeSignin(h);
+    res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      undefined,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('CSRF_INVALID');
+    expect(h.factoryTokens).toEqual([]);
+    await closeHarness(h);
+
+    // Write CSRF-validated but a read-only repository.
+    h = await createHarness();
+    const cookie2 = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie2);
+    res = await post(
+      h,
+      `/api/repos/${LOGIN}/docs/content`,
+      cookie2,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('REPO_NOT_ALLOWED');
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('builds the client from the refreshed access token when the stored token is near expiry', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h, {
+      tokenResponses: [
+        { ...TOKEN_RESPONSE, expires_in: 30 },
+        {
+          access_token: REFRESHED_ACCESS_TOKEN,
+          refresh_token: REFRESHED_REFRESH_TOKEN,
+          expires_in: 28800,
+          refresh_token_expires_in: 15897600,
+          token_type: 'bearer',
+          scope: 'repo',
+        },
+      ],
+    });
+    h.setContentFixture({ data: {}, create: {} });
+    const csrf = await csrfTokenFor(h, cookie);
+    const res = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      createBody({ path: 'n.md', content: 'x' }),
+    );
+    expect(res.status).toBe(201);
+    expect(h.factoryTokens).toEqual([REFRESHED_ACCESS_TOKEN]);
+    await closeHarness(h);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 7) The authorization boundary is reused, not reimplemented          */
 /* ------------------------------------------------------------------ */
 
 describe('content endpoint — authorization boundary (integration)', () => {
@@ -1096,7 +1682,7 @@ describe('content endpoint — authorization boundary (integration)', () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* 7) Credentials: which token builds the client, refresh integration  */
+/* 8) Credentials: which token builds the client, refresh integration  */
 /* ------------------------------------------------------------------ */
 
 describe('content endpoint — credentials (integration)', () => {
@@ -1143,12 +1729,20 @@ describe('content endpoint — credentials (integration)', () => {
     const cookie = await completeSignin(h);
     h.setContentFixture({
       data: { 'src/posts': [dirEntry('index.md', 'file', BLOB_SHA, 1)] },
+      create: { sha: NEW_SHA },
     });
     const denied = await get(h, `/api/repos/${LOGIN}/unlisted/content`, cookie);
     const allowed = await get(h, CONTENT_URL, cookie);
     expect(allowed.status).toBe(200);
     const csrf = await csrfTokenFor(h, cookie);
-    const mutation = await post(h, CONTENT_URL, cookie, csrf);
+    const mutation = await post(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      JSON.stringify({ path: 'leak-article.md', content: '# Leak check' }),
+    );
+    expect(mutation.status).toBe(201);
     for (const res of [denied, allowed, mutation]) {
       expect(res.body).not.toContain(ACCESS_TOKEN);
       expect(res.body).not.toContain(REFRESH_TOKEN);

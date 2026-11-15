@@ -1541,3 +1541,76 @@ No new dependencies; Node 24/26 compatibility preserved.
 ### Task boundary (Tasks 4.3–4.8 not started)
 
 No POST/PUT content handlers, no `FILE_EXISTS`/`CONTENT_TOO_LARGE`/`SHA_CONFLICT` HTTP responses, no dedicated UTF-8 round-trip milestone, no integration matrix, no retry UI, no file deletion, no editor/publish/Eleventy/UI work. No changes to session encryption, OAuth, CSRF, token refresh, or Phase 3 security controls beyond the boundary's return-type widening described in §2. The working tree change set for Task 4.2 is exactly: `src/server/index.ts` (route + handler + `AppOptions.contentClientFactory`), `src/server/middleware/repositoryAuth.ts` (`ContentBoundaryOutcome` return type + doc updates), `src/server/content/types.ts` (`ContentAdapter.getContent`), `src/server/content/index.ts` (`getContent`), `tests/unit/server/content-endpoint.test.ts` (new), `tests/unit/server/authorization.test.ts` (2 tests updated + harness option), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.
+
+## Task 4.3 — Authenticated repository content creation endpoint (2026-11-15, incl. review corrections 2026-11-15)
+
+### 1. Endpoint and dispatch
+
+New route: `POST /api/repos/{owner}/{repo}/content`, registered in `src/server/index.ts`. Dispatch (in the existing `/api/repos/...` branch):
+
+1. `matchContentRepositoryRef(pathname)` recognizes the content surface (unchanged).
+2. `isContentCreate` is true only for `POST` on exactly `/api/repos/{owner}/{repo}/content`; the file path, content, and optional commit message arrive in a JSON body, relative to the content root.
+3. `requiredAccess` is `'write'` (state-changing method), so the Task 3.4 boundary (`enforceContentBoundary`) enforces the full user-plus-App decision before the handler runs.
+4. The CSRF gate (Task 3.3) runs before the boundary for this state-changing request.
+5. When authorized, `handleContentCreate` runs; when denied, the boundary has already written the 401/403 response and the handler never executes.
+
+### 2. Handler (`handleContentCreate` in `src/server/index.ts`)
+
+- Body reading: `readCreateBody` (new, `src/server/index.ts`) buffers the request stream up to the 3 MiB hard cap `CREATE_BODY_MAX_BYTES` (headroom over the 1 MiB content limit: worst-case JSON escaping roughly doubles the payload, plus the message and JSON structure). The promise settles exactly once:
+  - `'ok'` — a complete body was received (every declared byte consumed).
+  - `'too_large'` — the cap was exceeded; buffering stops immediately (an oversized body is never retained in memory) and the handler answers `422 CONTENT_TOO_LARGE` with the safe envelope, drops the connection, and never parses or writes upstream.
+  - `'aborted'` — premature closure: an `'aborted'` or `'error'` event, a `'close'` event without a complete `'end'` (including a cleanly closed body that delivered fewer bytes than its declared `Content-Length`). Partial JSON is never parsed, no upstream write is attempted, and no response is written (the socket is already gone).
+- Listener hygiene: `readCreateBody` removes only its own listeners on completion (no `removeAllListeners`), and deliberately keeps its `'error'` listener attached for the stream's lifetime so a late stream error can never surface as an uncaught event.
+- Body shape: unparseable JSON, non-object payloads, missing/non-string `path`, missing/non-string `content` → `422 PATH_INVALID` (safe envelope) before any content client is constructed.
+- Optional `message` (review correction): accepted only when omitted or a string. A present non-string `message` — explicit `null`, number, boolean, array, or object — is rejected with `422 PATH_INVALID` before any content client is constructed. Accepted messages are normalized by the adapter (CRLF runs → single spaces, trimmed, 200-char cap).
+- Path/content validation: shared `validateContentPath` / `validateMarkdownContent` before any upstream request (no second validator) → `422 PATH_INVALID` / `422 CONTENT_TOO_LARGE`.
+- Existence check: the adapter's `createContent` performs a 404 pre-check and a `FILE_EXISTS` guard, then a SHA-less Contents API PUT; a concurrent-create 409 is reported `409 FILE_EXISTS` (never retried, never overwritten).
+- Commit metadata: no fabricated committer/author — fields omitted so GitHub attributes the commit to the authenticated token owner; default message `Create {relativePath}`.
+- Error mapping mirrors `handleContentRead`: a definitive GitHub 401 invalidates the session through the established session-storage mechanism; 403 (`REPO_NOT_ALLOWED`), 429 (`RATE_LIMITED`), 5xx/network (`GITHUB_UNAVAILABLE`) never do; unexpected shapes fail closed with safe `500 INTERNAL_ERROR`.
+- Success: `201` with the created file's `{ path, sha }`.
+
+### 3. Review corrections applied (2026-11-15)
+
+1. Optional `message` validation — see §2. Deterministic regression test added.
+2. Incomplete request streams — `readCreateBody` rewritten as above (single settle, cap, premature-close settlement, own-listener-only cleanup, persistent `'error'` listener). Deterministic regression tests added (see §4).
+3. OpenSpec audit — this section; `tasks.md` Task 4.3 evidence updated to the final state.
+
+### 4. Test suite (`tests/unit/server/content-endpoint.test.ts`)
+
+17 Task 4.3 integration tests, fully mocked via the injected `contentClientFactory` (no real GitHub credentials, tokens, or repositories — ephemeral ports, mocked fetch, temp SQLite, injected clock):
+
+1. 201 creation: default `Create {path}` message, new blob SHA, exactly one client construction, pre-check path exercised.
+2. Explicit normalized commit message honored.
+3. `409 FILE_EXISTS` for an existing file (no write sent).
+4. `409 FILE_EXISTS` for an existing directory (no write sent).
+5. Concurrent-create upstream 409 mapped to `FILE_EXISTS`.
+6. `PATH_INVALID` for traversal / absolute / backslash / empty paths, zero upstream requests.
+7. Content over 1 MiB → `422 CONTENT_TOO_LARGE`; exactly 1 MiB accepted.
+8. Malformed bodies (unparseable JSON, non-object payload, missing/non-string `path`/`content`) → `422 PATH_INVALID`, no client construction.
+9. Over-cap request body → `422 CONTENT_TOO_LARGE`, no client construction.
+10. Upstream 403/429/502/network mapped without session invalidation.
+11. Definitive upstream 401 invalidates the session.
+12. Malformed write payloads fail closed `500 INTERNAL_ERROR`.
+13. Boundary denials (unauthenticated, missing CSRF token, read-only repository) with zero client construction.
+14. Client built from the refreshed token for a near-expiry session.
+15. **New (review correction):** present non-string `message` values (`null`, number, boolean, array, object) each rejected `422 PATH_INVALID` with zero client construction; omitted message still accepted (201).
+16. **New (review correction):** an aborted upload — a raw socket destroyed mid-body after a declared `Content-Length` — settles the reader as `'aborted'`: zero client construction, zero upstream writes, server still handling requests afterwards.
+17. **New (review correction):** a body cleanly closed short of its declared `Content-Length` is also `'aborted'` (partial JSON never parsed, no upstream write, server live afterwards).
+
+The regression tests use a raw `node:net` socket against the live harness server: the partial body's flush (the socket's own write callback) deterministically precedes the socket's fate — no arbitrary sleep; the helper resolves on the client-side terminal event (`'close'` after a local destroy, `'finish'` once the FIN is flushed for a clean half-close — a half-closed upload the server answers with nothing legitimately never closes server-side, and the short body can never settle the reader `'ok'`, so the no-construction / no-write assertions hold without a server round trip); a finite 2 s cap *rejects* the test with a descriptive error if the socket never settles, so a hung socket can never produce a false pass; expected client-side `ECONNRESET`/`EPIPE` are still tolerated; and socket cleanup runs on both success and failure paths. Existing updates (pre-review): the credential-hygiene test performs a real 201 creation; the `authorization.test.ts` boundary test for an authenticated CSRF-validated write now asserts the write reaches the Task 4.3 handler (`422 PATH_INVALID` for an empty body) instead of the former placeholder 404.
+
+### 5. Verification gates (2026-11-15)
+
+Re-run after the review corrections: `npm run lint` 0; `npm run typecheck` 0 (web + server); `npm run test` 710/710 across 21 files (693 existing + 17 new Task 4.3 tests, no existing test removed or weakened); `npm run build` 0; `npm run build:server` 0; `npm run test:e2e` passing; `npm audit` clean; `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean.
+
+Local verification (no live GitHub writes): backend and frontend run locally in the unconfigured state — the unconfigured authentication flow is safe (no credentials required to reach the sign-in surface), and an unauthenticated `POST /api/repos/{owner}/{repo}/content` returns 401 before any content client is constructed. No live GitHub writes were performed.
+
+### 6. Scope notes
+
+- No changes to session encryption, OAuth, CSRF, token refresh, the Task 4.1 adapter, or the Task 4.2 read endpoint.
+- Task 4.4 and later (PUT update, full HTTP error-mapping layer, dedicated UTF-8 round-trip milestone, comprehensive mocked integration matrix, retry UI) not started; `tasks.md` leaves 4.4–4.8 unchecked.
+- Staged/committed/pushed: none — this work awaits independent source review.
+
+### Task boundary (Tasks 4.4–4.8 not started)
+
+No PUT content handler, no `SHA_CONFLICT` HTTP response, no dedicated UTF-8 round-trip milestone, no comprehensive integration matrix, no retry UI. The working tree change set for Task 4.3 is exactly: `src/server/index.ts` (route + handler + `readCreateBody`), `tests/unit/server/content-endpoint.test.ts` (17 tests), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.
