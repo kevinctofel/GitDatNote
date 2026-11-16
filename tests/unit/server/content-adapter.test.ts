@@ -972,6 +972,205 @@ describe('updateContent', () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Task 4.6 — UTF-8 encoding: create → read round-trip (stateful mock)  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Stateful mock GitHub repository (Task 4.6): retains exactly the base64
+ * payload each write submits and serves that stored payload on reads.
+ * The mocked read is therefore generated from what the write actually
+ * submitted — never reconstructed from the original string — which is
+ * what lets an encoding bug in either direction surface.
+ */
+function createStatefulMock() {
+  const files = new Map<string, { payload: string; sha: string }>();
+  const written: Array<{ payload: string; sha: string; expectedSha?: string }> = [];
+  const readPayloads: string[] = [];
+  let counter = 0;
+  const nextSha = (): string => {
+    counter += 1;
+    return counter.toString(16).padStart(40, '0');
+  };
+  const client: ContentClient = {
+    rest: {
+      repos: {
+        getContent: async (params) => {
+          const entry = files.get(params.path);
+          if (entry === undefined) {
+            throw httpError(404);
+          }
+          readPayloads.push(entry.payload);
+          return {
+            data: {
+              type: 'file',
+              name: params.path.split('/').pop() ?? 'roundtrip.md',
+              sha: entry.sha,
+              size: Buffer.from(entry.payload, 'base64').byteLength,
+              encoding: 'base64',
+              content: entry.payload,
+            },
+          };
+        },
+        createOrUpdateFileContents: async (params) => {
+          const existing = files.get(params.path);
+          if (params.sha === undefined) {
+            if (existing !== undefined) {
+              throw httpError(409);
+            }
+          } else if (existing === undefined || existing.sha !== params.sha) {
+            throw httpError(409);
+          }
+          const sha = nextSha();
+          files.set(params.path, { payload: params.content, sha });
+          written.push({
+            payload: params.content,
+            sha,
+            expectedSha: params.sha,
+          });
+          return { data: { content: { sha } } };
+        },
+      },
+    },
+  };
+  return { client, files, written, readPayloads };
+}
+
+/**
+ * Multilingual Markdown fixture (Task 4.6): accented Latin, CJK (ZH/JA/KO),
+ * Spanish, emoji (supplementary-plane, surrogate pairs in JS), a decomposed
+ * combining sequence (e + U+0301) alongside the precomposed é, multiple
+ * Markdown lines, blank lines, and mixed ASCII/non-ASCII punctuation.
+ * The adapter must return this string exactly — no Unicode normalization,
+ * no line-ending rewriting, no emoji variation-selector alteration.
+ */
+const ROUND_TRIP_MARKDOWN = [
+  '# Café — 東京の日記 🚀',
+  '',
+  'Français: naïve, façade, déjà vu, crème brûlée.',
+  '',
+  '中文：你好世界，这是我的博客。',
+  '',
+  '日本語：こんにちは、世界。',
+  '',
+  '한국어: 안녕하세요 세계.',
+  '',
+  'Español: ¡Buenos días!',
+  '',
+  'Emoji: 📝 🌍 🚀 ✨ ❤️',
+  '',
+  'Combining: e\u0301 versus precomposed é.',
+].join('\n');
+
+describe('Task 4.6 — UTF-8 round-trip (stateful mock)', () => {
+  // Primary acceptance: create → read, where the read is sourced from the
+  // write's recorded base64 payload (real production decode path).
+  it('create → read: the recorded write payload is the exact source of the read', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    const created = await a.createContent(
+      OWNER,
+      REPO,
+      '2026/Nov/roundtrip.md',
+      ROUND_TRIP_MARKDOWN,
+    );
+
+    // (1) The write was sent as base64 of the original string's UTF-8 bytes
+    //     (byte-level, not just text-level).
+    expect(mock.written).toHaveLength(1);
+    const submittedBytes = Buffer.from(mock.written[0].payload, 'base64');
+    const originalBytes = Buffer.from(ROUND_TRIP_MARKDOWN, 'utf8');
+    expect(submittedBytes.equals(originalBytes)).toBe(true);
+    expect(submittedBytes.byteLength).toBe(originalBytes.byteLength);
+    // Mixed-language UTF-8 byte length exceeds the JS string length.
+    expect(Buffer.byteLength(ROUND_TRIP_MARKDOWN, 'utf8')).toBeGreaterThan(
+      ROUND_TRIP_MARKDOWN.length,
+    );
+
+    // (2) Create result: content-root-relative path and the mocked blob SHA.
+    expect(created).toEqual({
+      path: '2026/Nov/roundtrip.md',
+      sha: mock.written[0].sha,
+    });
+
+    // (3) Read the same path through the adapter's real production decode
+    //     path (strict base64 shape + fatal UTF-8).
+    const file = await a.readContent(OWNER, REPO, '2026/Nov/roundtrip.md');
+
+    // (4) The mocked GitHub read served exactly the payload the write
+    //     submitted — no independent reconstruction.
+    expect(mock.readPayloads).toHaveLength(1);
+    expect(mock.readPayloads[0]).toBe(mock.written[0].payload);
+
+    // (5) The decoded result equals the original string exactly (character
+    //     level), and the byte sequences match.
+    expect(file.content).toBe(ROUND_TRIP_MARKDOWN);
+    expect(Buffer.from(file.content, 'utf8').equals(originalBytes)).toBe(true);
+
+    // (6) No normalization: decomposed (e + U+0301) and precomposed (é)
+    //     forms both survive unchanged, code point for code point.
+    expect(file.content.includes('e\u0301')).toBe(true);
+    expect(file.content.includes('é')).toBe(true);
+    expect([...file.content].join('\u{1}')).toBe([...ROUND_TRIP_MARKDOWN].join('\u{1}'));
+
+    // (7) Metadata: the mock's blob SHA, the exact UTF-8 byte size, and the
+    //     content-root-relative path — no rendering or sanitization applied.
+    expect(file.sha).toBe(mock.written[0].sha);
+    expect(file.size).toBe(originalBytes.byteLength);
+    expect(file.path).toBe('2026/Nov/roundtrip.md');
+  });
+
+  // Focused extension (Task 4.6 §7): update an existing Unicode file with
+  // different Unicode text via the existing updateContent() implementation,
+  // then read it back exactly.
+  it('update → read: changed multilingual Unicode round-trips with the new SHA', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    await a.createContent(OWNER, REPO, '2026/Nov/roundtrip.md', ROUND_TRIP_MARKDOWN);
+
+    // Read its initial SHA through the production read path, then update
+    // the file with different multilingual Unicode text using that SHA.
+    const initial = await a.readContent(OWNER, REPO, '2026/Nov/roundtrip.md');
+    expect(initial.content).toBe(ROUND_TRIP_MARKDOWN);
+    const updatedText = [
+      '# 更新済み 📝',
+      '',
+      '한국어: 새로 고침됨. Français: déjà mis à jour ✨',
+    ].join('\n');
+    const updated = await a.updateContent(
+      OWNER,
+      REPO,
+      '2026/Nov/roundtrip.md',
+      updatedText,
+      initial.sha,
+    );
+
+    // The update carried the expected SHA and the new text's UTF-8 bytes.
+    expect(mock.written).toHaveLength(2);
+    expect(mock.written[1].expectedSha).toBe(initial.sha);
+    expect(Buffer.from(mock.written[1].payload, 'base64').equals(Buffer.from(updatedText, 'utf8'))).toBe(
+      true,
+    );
+    expect(updated).toEqual({
+      path: '2026/Nov/roundtrip.md',
+      sha: mock.written[1].sha,
+    });
+
+    // Read again: the stored update payload is the read's source, and the
+    // decoded content equals the updated string exactly.
+    const file = await a.readContent(OWNER, REPO, '2026/Nov/roundtrip.md');
+    // Three reads in total: the initial read, the adapter's read-only
+    // pre-update SHA conflict check (fetchExistingEntry), and this final
+    // read. The final read serves the recorded update payload.
+    expect(mock.readPayloads).toHaveLength(3);
+    expect(mock.readPayloads[2]).toBe(mock.written[1].payload);
+    expect(file.content).toBe(updatedText);
+    expect(Buffer.from(file.content, 'utf8').equals(Buffer.from(updatedText, 'utf8'))).toBe(true);
+    expect(file.sha).toBe(updated.sha);
+    expect(file.size).toBe(Buffer.byteLength(updatedText, 'utf8'));
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* Construction and client                                             */
 /* ------------------------------------------------------------------ */
 

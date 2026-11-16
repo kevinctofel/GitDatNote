@@ -1813,3 +1813,78 @@ Backend (`npm run dev:server`, 127.0.0.1:3000) and frontend (`npm run dev`, loca
 - Tasks 4.6–4.8 not started: no dedicated UTF-8 round-trip milestone, no broad integration matrix, no retry UI states or countdowns, no automatic GitHub write retries, no backoff/queue, no new editor components, no publishing/deployment features.
 - Staged/committed/pushed: none — this work awaits independent source review.
 - The working-tree change set for Task 4.5 is exactly: `src/shared/types.ts`, `src/shared/errors.ts`, `src/server/middleware/errorHandling.ts`, `src/server/content/index.ts`, `tests/unit/shared/errors.test.ts`, `tests/unit/server/content-adapter.test.ts`, `tests/unit/server/content-endpoint.test.ts`, `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry. Unrelated local `.hermes/skills/` modifications and untracked files remain preserved and untouched.
+
+## Task 4.6 — UTF-8 Encoding and End-to-End Content Round-Trip (2026-11-16)
+
+**Status:** Complete — test-only completion. No production-code changes were required: the audit confirmed the accepted adapter's UTF-8 encoding and strict decoding were already fully implemented and correct, and the sole demonstrable gap was the missing true create → read round-trip test in which the read is sourced from the write's recorded payload.
+
+**Baseline:** `948066e` (Task 4.5 complete). Expected baseline: 756 Vitest / 10 Playwright.
+
+### 1. Audit of the existing UTF-8 implementation (verified against live source)
+
+- **Outbound (write → GitHub):** `src/server/content/index.ts` — `encodeContent()` runs `Buffer.from(content, 'utf8').toString('base64')` on the validated input string. Both `createContent` and `updateContent` send `content: encodeContent(content)` to `client.rest.repos.createOrUpdateFileContents` (no `author`/`committer`; commits are attributed to the token per design A-05). The string→UTF-8-byte→base64 pipeline is applied identically for every write, so accented, CJK, and emoji content is encoded from the exact input code units.
+- **Inbound (GitHub → client):** `getContent`/`readContent` → `fileContent()` enforces `type: 'file'` and `encoding: 'base64'` (any other encoding is treated as an unexpected upstream shape → safe `INTERNAL_ERROR`), then `decodeStrictBase64()`: CR/LF line breaks are removed before strict base64 validation (GitHub's Contents API returns single-line base64; valid CR/LF-wrapped base64 is accepted), the compact result must match the strict base64 shape — valid alphabet characters only, with padding only in the final group — rejecting invalid alphabet characters, malformed padding, truncated payloads, and any other unsupported whitespace, and a decode/re-encode consistency check enforces canonical base64 encoding after CR/LF removal (the decoded bytes must re-encode to exactly the same compact string), then `TextDecoder('utf-8', { fatal: true })` rejects invalid UTF-8 bytes. Any decode failure (malformed base64, invalid or overlong UTF-8 continuation bytes, unpaired surrogate artifacts) becomes a safe `INTERNAL_ERROR` — the adapter never silently replaces invalid characters.
+- **Size limit:** `validateMarkdownContent()` (`src/shared/validate.ts`) measures the string in **UTF-8 bytes** via `TextEncoder` and enforces `MAX_MARKDOWN_BYTES = 1024 * 1024`; rejection happens before any GitHub request. Exactly 1 MiB of valid UTF-8 is allowed; content is never truncated to fit.
+- **No interference:** the adapter performs no Unicode normalization (NFC/NFD), no line-ending rewriting, no Markdown rendering, and no HTML sanitization — those live in the separate frontend pipeline. Emoji variation selectors and combining marks pass through untouched.
+- **Conclusion:** no Task 4.6 production defect. Per §12, the task was completed with focused tests + documentation; production code was left untouched.
+
+### 2. New round-trip tests (stateful mock architecture)
+
+File: `tests/unit/server/content-adapter.test.ts` — new `Task 4.6 — UTF-8 round-trip (stateful mock)` group, **2 new tests** (no existing tests removed or weakened; suite 56 → 58).
+
+- **`createStatefulMock()`** implements a stateful mock GitHub repository over the existing `ContentClient` interface: a `Map<path, { payload, sha }>` store where `payload` is exactly the base64 string each write submits. `createOrUpdateFileContents` records the submitted payload and the returned blob SHA (40-digit hex, fresh per write), returns a realistic `{ data: { content: { sha } } }` response, and enforces create-vs-update semantics (409 when a create targets an existing path or an update's `sha` doesn't match stored state). `getContent` serves the **stored payload** for the requested path (404 if absent) and records every served payload in `readPayloads`.
+- **Primary acceptance test — `create → read`:** nonexistent file → `adapter.createContent(...)` with the multilingual fixture → the mock records the base64 → realistic create response with a blob SHA → `adapter.readContent(...)` on the same path → the mock returns the recorded payload → the adapter's **real production decode path** runs → assertions below. The read is generated from the recorded write payload — never reconstructed from the original string.
+- **Extension test — `update → read`** (focused §7, reusing the existing `updateContent`): create the fixture file → read the initial SHA through the production read path → update with different multilingual text using that SHA → the mock stores the update's payload and a new SHA → the final read decodes to exactly the updated text. Note: `updateContent` performs a read-only pre-update SHA conflict check (`fetchExistingEntry` → one extra `getContent`), which the stateful mock observes; the test asserts all three reads (`readPayloads` length 3) and that the final read served the recorded update payload.
+
+### 3. Multilingual fixture and assertions
+
+Fixture categories (single LF-joined string, no normalization applied by the adapter):
+- Accented Latin: `Café`, `naïve`, `façade`, `déjà vu`, `crème brûlée`.
+- CJK: `中文：你好世界，这是我的博客。` (fullwidth colon/comma), `日本語：こんにちは、世界。`, `한국어: 안녕하세요 세계.`.
+- Spanish: `¡Buenos días!` (inverted exclamation).
+- Supplementary-plane emoji (JS surrogate pairs): `📝 🌍 🚀 ✨ ❤️`, including `❤️` with its U+FE0F variation selector, which must survive unaltered.
+- Combining vs precomposed: decomposed `e\u0301` (e + U+0301) alongside precomposed `é` — both must survive unchanged (no implicit NFC/NFD normalization).
+- Structure: multiple Markdown lines (H1 heading + paragraphs), blank lines, mixed ASCII and non-ASCII punctuation.
+
+Assertions (byte-level and character-level):
+- `Buffer.from(mock.written[0].payload, 'base64').equals(Buffer.from(fixture, 'utf8'))` — the submitted base64 decodes to the exact original UTF-8 byte sequence (byte equality, not text equality).
+- `Buffer.byteLength(fixture, 'utf8') > fixture.length` — mixed-language UTF-8 byte length exceeds the JS string length (the two are never conflated).
+- `file.content === fixture` (exact string equality) and `Buffer.from(file.content, 'utf8').equals(originalBytes)` (byte equality of the read-back).
+- Code-point-level equality via iterator-spread join (`[...str].join(...)`) — verifies surrogate-pair/supplementary-plane handling is exact.
+- `file.content.includes('e\u0301')` and `file.content.includes('é')` — composed and decomposed forms both preserved as-is.
+- `mock.readPayloads[0] === mock.written[0].payload` — the read served exactly the recorded write payload.
+- Metadata: `file.sha` equals the mocked blob SHA; `file.size` equals the exact UTF-8 byte length; `file.path` remains content-root-relative (`2026/Nov/roundtrip.md`).
+- No normalization, rendering, or sanitization is observable in the result (exact string equality subsumes this).
+
+### 4. Verification gates (2026-11-16, clean `npm ci`)
+
+| Gate | Result |
+|---|---|
+| `npm ci` | exit 0 (clean install, 0 vulnerabilities; 3 pre-existing `install-scripts` advisories for `better-sqlite3`/`esbuild`, unchanged) |
+| `npm run lint` | exit 0, 0 warnings |
+| `npm run typecheck` | exit 0 (web + server) |
+| `npm run test` | **758/758** across 21 files (756 baseline + 2 new; none removed or weakened) |
+| `npm run build` | exit 0 (135 modules) |
+| `npm run build:server` | exit 0 |
+| `npm run test:e2e` | **10/10** passing (2.8 s) |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing length warnings in `specs/github-connection/spec.md`, unchanged) |
+| `git diff --check` | clean |
+
+No new dependencies; Node 24/26 compatibility preserved.
+
+### 5. Local verification (no live GitHub writes)
+
+Backend (`npm run dev:server`, 127.0.0.1:3000) and frontend (`npm run dev`, localhost:5173, Vite v6.4.5) run locally in the unconfigured state. The server logs the expected `session_storage_unavailable` / `auth_not_configured` warnings without crashing; no credentials appear in logs. Browser: the UI loads in the safe "Not connected to GitHub" state; the sample preview renders sample Markdown through the safe pipeline (marked + DOMPurify) with **zero console errors** and no iframes/objects; no browser writing interface exists. Unauthenticated `curl -i http://127.0.0.1:3000/api/repos/example/blog/content?path=test.md` → **HTTP 401** with the clean standard envelope `{"error":{"code":"UNAUTHORIZED","message":"Your session is no longer valid. Please sign in again.","retryable":false,"status":401}}`. The entire Task 4.6 round-trip ran against the in-memory stateful mock — no live GitHub API calls or repository writes. Both servers stopped cleanly (SIGTERM); no process left running; port 3000 free.
+
+### 6. Known limitations
+
+- The mock is in-memory per test; a true wire-level round-trip (HTTP transport, real base64 framing) is out of scope until the Phase 5 HTTP client layer exists. The stateful mock exercises the exact `ContentClient` contract that layer will implement.
+- The 2 pre-existing `openspec validate` length warnings in `specs/github-connection/spec.md` predate this task and are unrelated.
+
+### 7. Scope notes and task boundary
+
+- No production-code changes: `src/server/content/index.ts`, `src/shared/validate.ts`, error mapping, `Retry-After` behavior, session/OAuth/CSRF handling, SHA conflict protection, content-root containment, and the 1 MiB UTF-8 byte limit are all unchanged from the Task 4.5 baseline.
+- The working-tree change set for Task 4.6 is exactly: `tests/unit/server/content-adapter.test.ts` (+2 tests), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry. Unrelated local `.hermes/skills/` modifications and untracked files remain preserved and untouched.
+- Staged/committed/pushed: none — this work awaits independent source review.
+- Tasks 4.7 (mocked integration matrix) and 4.8 (retry UI states) were **not** started and remain unchecked.
