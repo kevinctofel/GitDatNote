@@ -56,6 +56,7 @@ import { TextDecoder } from 'node:util';
 import { Octokit } from 'octokit';
 
 import {
+  MAX_RETRY_AFTER_SECONDS,
   errorDetail,
   mapGithubHttpError,
   mapGithubNetworkError,
@@ -167,7 +168,10 @@ function upstreamError(err: unknown): ContentAdapterError {
   if (rateLimited) {
     const retryAfter = headers['retry-after'];
     if (typeof retryAfter === 'string' && /^\d+$/.test(retryAfter)) {
-      retryAfterSeconds = Number.parseInt(retryAfter, 10);
+      const parsed = Number.parseInt(retryAfter, 10);
+      if (parsed <= MAX_RETRY_AFTER_SECONDS) {
+        retryAfterSeconds = parsed;
+      }
     }
   }
   return new ContentAdapterError(

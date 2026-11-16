@@ -12,14 +12,33 @@
 
 import type { ServerResponse } from 'node:http';
 import type { ErrorDetail } from '../../shared/types.js';
-import { errorDetail, toErrorResponse } from '../../shared/errors.js';
+import {
+  errorDetail,
+  isValidRetryAfterSeconds,
+  toErrorResponse,
+} from '../../shared/errors.js';
 import type { Logger } from './logging.js';
 
-/** Write a JSON API error response built from a shared `ErrorDetail`. */
+/**
+ * Write a JSON API error response built from a shared `ErrorDetail`.
+ *
+ * Task 4.5: a `RATE_LIMITED` detail carrying a validated whole-second
+ * delay is surfaced as a standards-compatible `Retry-After` response
+ * header. The value is re-validated here so no raw or untrusted upstream
+ * header text can ever be forwarded; responses without a trustworthy
+ * delay are unchanged.
+ */
 export function sendJsonError(res: ServerResponse, detail: ErrorDetail): void {
-  res.writeHead(detail.status, {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json; charset=utf-8',
-  });
+  };
+  if (
+    detail.code === 'RATE_LIMITED' &&
+    isValidRetryAfterSeconds(detail.retryAfterSeconds)
+  ) {
+    headers['Retry-After'] = String(detail.retryAfterSeconds);
+  }
+  res.writeHead(detail.status, headers);
   res.end(JSON.stringify(toErrorResponse(detail)));
 }
 

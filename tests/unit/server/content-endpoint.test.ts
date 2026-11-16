@@ -498,7 +498,13 @@ async function get(
   h: Harness,
   path: string,
   cookie?: string,
-): Promise<{ status: number; body: string; json: unknown; code: string | undefined }> {
+): Promise<{
+  status: number;
+  body: string;
+  json: unknown;
+  code: string | undefined;
+  headers: Record<string, string>;
+}> {
   const headers: Record<string, string> = {};
   if (cookie !== undefined) headers.cookie = cookie;
   const res = await fetch(h.base + path, { headers });
@@ -509,7 +515,13 @@ async function get(
   } catch {
     json = null;
   }
-  return { status: res.status, body, json, code: codeOf(json) };
+  // Task 4.5: expose response headers (lowercase, as fetch normalizes
+  // them) so `Retry-After` propagation can be asserted.
+  const responseHeaders: Record<string, string> = {};
+  res.headers.forEach((value, key) => {
+    responseHeaders[key] = value;
+  });
+  return { status: res.status, body, json, code: codeOf(json), headers: responseHeaders };
 }
 
 async function head(
@@ -558,7 +570,13 @@ async function put(
   cookie?: string,
   csrf?: string,
   rawBody: string = '{}',
-): Promise<{ status: number; body: string; json: unknown; code: string | undefined }> {
+): Promise<{
+  status: number;
+  body: string;
+  json: unknown;
+  code: string | undefined;
+  headers: Record<string, string>;
+}> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -576,7 +594,11 @@ async function put(
   } catch {
     json = null;
   }
-  return { status: res.status, body, json, code: codeOf(json) };
+  const responseHeaders: Record<string, string> = {};
+  res.headers.forEach((value, key) => {
+    responseHeaders[key] = value;
+  });
+  return { status: res.status, body, json, code: codeOf(json), headers: responseHeaders };
 }
 
 /**
@@ -1079,6 +1101,114 @@ describe('content endpoint — upstream error mapping (integration)', () => {
     const res = await get(h, CONTENT_URL, cookie);
     expect(res.status).toBe(502);
     expect(res.code).toBe('GITHUB_UNAVAILABLE');
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 5a) Retry-After propagation (Task 4.5)                             */
+/* ------------------------------------------------------------------ */
+
+describe('content endpoint — Retry-After propagation (Task 4.5, integration)', () => {
+  it('propagates a valid Retry-After header on a 429 rate limit', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    h.setContentFixture({ status: 429, headers: { 'Retry-After': '30' } });
+    const res = await get(h, CONTENT_URL, cookie);
+    expect(res.status).toBe(429);
+    expect(res.code).toBe('RATE_LIMITED');
+    expect(res.headers['retry-after']).toBe('30');
+    const error = (res.json as { error: Record<string, unknown> }).error;
+    expect(error.retryAfterSeconds).toBe(30);
+    expect(error.retryable).toBe(true);
+    // Rate limiting does not invalidate the session.
+    h.setContentFixture({
+      data: { 'src/posts': [dirEntry('index.md', 'file', BLOB_SHA, 1)] },
+    });
+    const followup = await get(h, CONTENT_URL, cookie);
+    expect(followup.status).toBe(200);
+  });
+
+  it('propagates Retry-After for a rate-limited 403', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    h.setContentFixture({
+      status: 403,
+      headers: { 'X-RateLimit-Remaining': '0', 'Retry-After': '45' },
+    });
+    const res = await get(h, CONTENT_URL, cookie);
+    expect(res.status).toBe(429);
+    expect(res.code).toBe('RATE_LIMITED');
+    expect(res.headers['retry-after']).toBe('45');
+  });
+
+  it('omits the header and structured field when the upstream sends no timing', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    h.setContentFixture({ status: 429 });
+    const res = await get(h, CONTENT_URL, cookie);
+    expect(res.status).toBe(429);
+    expect(res.code).toBe('RATE_LIMITED');
+    expect(res.headers['retry-after']).toBeUndefined();
+    const error = (res.json as { error: Record<string, unknown> }).error;
+    expect(error.retryAfterSeconds).toBeUndefined();
+  });
+
+  it.each(['', 'abc', '-5', '1.5', '999999999999'])(
+    'ignores an untrustworthy Retry-After value (%s) without a header',
+    async (value) => {
+      const h = await createHarness();
+      const cookie = await completeSignin(h);
+      h.setContentFixture({ status: 429, headers: { 'Retry-After': value } });
+      const res = await get(h, CONTENT_URL, cookie);
+      expect(res.status).toBe(429);
+      expect(res.code).toBe('RATE_LIMITED');
+      expect(res.headers['retry-after']).toBeUndefined();
+    },
+  );
+
+  it('never turns an ordinary 403 into a rate limit because of an incidental Retry-After', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    h.setContentFixture({ status: 403, headers: { 'Retry-After': '30' } });
+    const res = await get(h, CONTENT_URL, cookie);
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('REPO_NOT_ALLOWED');
+    expect(res.headers['retry-after']).toBeUndefined();
+    // Session preserved.
+    h.setContentFixture({
+      data: { 'src/posts': [dirEntry('index.md', 'file', BLOB_SHA, 1)] },
+    });
+    const followup = await get(h, CONTENT_URL, cookie);
+    expect(followup.status).toBe(200);
+  });
+
+  it('rate-limits an update with Retry-After and never writes or retries the write', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, cookie);
+    h.setContentFixture({ status: 429, headers: { 'Retry-After': '75' } });
+    const res = await put(
+      h,
+      CONTENT_URL,
+      cookie,
+      csrf,
+      JSON.stringify({
+        path: 'note.md',
+        content: '# new',
+        expectedSha: BLOB_SHA,
+      }),
+    );
+    expect(res.status).toBe(429);
+    expect(res.code).toBe('RATE_LIMITED');
+    expect(res.headers['retry-after']).toBe('75');
+    // No write was ever attempted, and none was retried.
+    expect(h.createdCalls).toEqual([]);
+    // Session preserved: the follow-up read succeeds.
+    h.setContentFixture({
+      data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+    });
+    const followup = await get(h, `${CONTENT_URL}?path=note.md`, cookie);
+    expect(followup.status).toBe(200);
   });
 });
 

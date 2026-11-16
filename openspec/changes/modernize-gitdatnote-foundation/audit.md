@@ -1698,3 +1698,118 @@ Local verification (no live GitHub writes): backend (127.0.0.1:3996) and the Vit
 No full HTTP error-mapping layer, no dedicated UTF-8 round-trip milestone, no comprehensive integration matrix, no retry UI. The working-tree change set for Task 4.4 is exactly: `src/server/index.ts` (dispatch branch + `handleContentUpdate`, +147/−10), `tests/unit/server/content-endpoint.test.ts` (new `file update (integration)` group, 19 tests; file now 2425 lines), `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (Task 4.4 checkbox + evidence), and this audit entry.
 
 No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `8718120`. Unrelated local changes (modified and untracked `.hermes/skills/` files) preserved untouched.
+
+## Task 4.5 — Complete GitHub API error mapping (2026-11-15)
+
+### 1. Character of the task: audit and completion
+
+Task 4.5 is an audit-and-completion milestone. Tasks 3.x and 4.1–4.4 had already built the error-mapping stack; this task required establishing which requirements were already satisfied, demonstrating the remaining gaps, and implementing only those gaps without introducing a second error-mapping framework or replacing the typed error domain.
+
+### 2. Baseline audit — existing behaviors confirmed without changes
+
+Verified by source review of `src/shared/errors.ts`, `src/shared/types.ts`, `src/server/content/index.ts`, `src/server/content/types.ts`, `src/server/middleware/errorHandling.ts`, `src/server/middleware/repositoryAuth.ts`, `src/server/auth/github.ts`, `src/server/auth/authorization.ts`, `src/server/auth/refresh.ts`, and `src/server/index.ts`, plus the existing regression suites:
+
+- **Shared pure status mapping** (`src/shared/errors.ts`): `mapGithubHttpError()` maps 401 → `UNAUTHORIZED` (not retryable), 403 → `REPO_NOT_ALLOWED` (not retryable), 404 → `FILE_NOT_FOUND` (not retryable), 409 → `SHA_CONFLICT` (not retryable), 422 → `PATH_INVALID` by default with `validation: 'size'` context → `CONTENT_TOO_LARGE` (not retryable), 429 → `RATE_LIMITED` (retryable), 5xx → `GITHUB_UNAVAILABLE` (retryable); `mapGithubNetworkError()` maps transport failures → `GITHUB_UNAVAILABLE` (retryable). A 403 with explicit rate-limit context maps to `RATE_LIMITED` at 429 status; an ordinary 403 never does.
+- **Octokit normalization** (`upstreamError()` in `src/server/content/index.ts`): extracts the upstream code/message and distinguishes a rate-limited 403 (evidenced by `x-ratelimit-remaining: 0`) from an ordinary 403; passes retry timing into the shared mapper; operation-specific semantics live here — a create collision is `FILE_EXISTS`, an update conflict is `SHA_CONFLICT` (never every 409 collapsed to one code).
+- **Standard HTTP responses** (`src/server/middleware/errorHandling.ts`): `sendJsonError()` writes the standard `{ error: ErrorDetail }` JSON envelope with status derived from the shared code→status contract and safe client-visible messages; `sendUnexpectedError()` writes `500 INTERNAL_ERROR`. Neither exposes tokens, raw Octokit messages, stack traces, or Markdown.
+- **Session invalidation** (`src/server/index.ts` content handlers + boundary): a definitive GitHub 401 arising from the current user's authenticated credentials invalidates the affected session through the established session-storage mechanism, consistently across `handleContentRead` (GET), `handleContentCreate` (POST), and `handleContentUpdate` (PUT), and the repository-authorization boundary. Ordinary 403, 429, 5xx, network, and validation failures never invalidate. The session → CSRF → refresh → authorization → operation ordering is unchanged.
+- **Permission-denied vs rate-limited 403**: the distinction is made at the adapter from the upstream `x-ratelimit-remaining` evidence, not from header presence alone; the shared mapper only accepts explicit rate-limit context.
+- **SHA-conflict and create-collision** (Task 4.4/4.1 semantics, unchanged): stale `expectedSha` → `409 SHA_CONFLICT` with `error.currentSha` when known; a concurrent-update 409 triggers exactly one read-only refetch, never a write retry; a failed refetch keeps `SHA_CONFLICT` without a fabricated `currentSha`; create collisions → `409 FILE_EXISTS`; no automatic conflict resolution or merging.
+- **Local size validation**: the 1 MiB Markdown limit is enforced locally before any GitHub contact (Task 4.3/4.4), and the 3 MiB body cap rejects over-cap bodies before JSON parsing.
+- **Repository authorization**: `enforceContentBoundary()` runs before content access; unauthorized repositories receive the safe 403 response; `FILE_NOT_FOUND` is reachable only after successful authorization, so the content 404 never reveals whether a private repository exists.
+- **Regression coverage at baseline**: 50 adapter tests (`content-adapter.test.ts`) covering the mapping under mocked Octokit responses; 72 endpoint tests (`content-endpoint.test.ts`, Tasks 4.2–4.4) covering every mapping at the HTTP level including session-invalidation semantics; shared mapping tests (`errors.test.ts`).
+
+### 3. Gap identified
+
+Exactly one demonstrable gap: **`Retry-After` propagation.** The adapter already recognized 429 and rate-limited 403 and parsed a numeric upstream `retry-after` value, but the shared mapper stored only a rounded human-readable hint in the message — no structured retry-delay field — and `sendJsonError()` wrote the JSON body without any `Retry-After` response header. The OpenSpec requirement "429 → `RATE_LIMITED` (include `Retry-After`)" was therefore not satisfied at the HTTP level.
+
+### 4. Implementation (smallest appropriate extension; no second framework)
+
+Four production files, all in the established locations:
+
+- `src/shared/types.ts` — backward-compatible optional `retryAfterSeconds?: number` added to `ErrorDetail`: a validated, nonnegative, finite whole number of seconds. Existing consumers that construct details are unaffected (the field is optional and only present when trustworthy).
+- `src/shared/errors.ts` — `MAX_RETRY_AFTER_SECONDS = 86_400` (one day, a hard bound for a sane rate-limit delay) and a `isValidRetryAfterSeconds()` type guard (number, integer, ≥ 0, ≤ max). `rateLimitedDetail()` carries the field only when valid; no other detail constructor can set it. The existing rounded message hint is unchanged.
+- `src/server/content/index.ts` — `upstreamError()` reads the upstream `retry-after` header (case-insensitive, the location Octokit normalizes headers to) and assigns it to the detail only when it parses to a number within bounds; otherwise the field is simply absent.
+- `src/server/middleware/errorHandling.ts` — `sendJsonError()` emits a `Retry-After: <seconds>` header on `RATE_LIMITED` responses when the detail carries a validated value. It never forwards arbitrary upstream headers, never emits raw upstream header text, and re-validates before emitting, so invalid or unsafe header values cannot reach the wire.
+
+### 5. Retry-After validation and propagation semantics
+
+- Accepted and propagated: whole-second delays `0`–`86_400` (e.g. `30`, `0`, `86400`).
+- Omitted safely (no header, no field, no invented countdown): absent header; negative values; fractional values (e.g. `1.5`); non-numeric/garbage (e.g. `abc`); `NaN`/`Infinity`; values over `86_400`.
+- Case-insensitive header names are handled (Octokit normalizes, and the mapper reads the normalized lowercase key; tests exercise both casings).
+- A plain 403 with an incidental `Retry-After` header is never reclassified as a rate limit and never gets the header forwarded — rate-limit determination remains status-429 or 403-with-`x-ratelimit-remaining: 0` only.
+- The header is standards-compatible: numeric seconds.
+- Retryability metadata (`retryable: true` on `RATE_LIMITED`) is unchanged; no automatic write retry occurs — a rate-limited PUT records zero write attempts.
+
+### 6. Final HTTP error mapping (all verified by tests)
+
+| GitHub failure | GitDatNote response | Retryable | `Retry-After` header |
+|---|---|---|---|
+| 401 (definitive) | 401 `UNAUTHORIZED`, session invalidated | false | no |
+| Ordinary 403 | 403 `REPO_NOT_ALLOWED` | false | no |
+| 404 after repository authorization | 404 `FILE_NOT_FOUND` | false | no |
+| Create collision 409 | 409 `FILE_EXISTS` | false | no |
+| Update conflict 409 | 409 `SHA_CONFLICT` (+`currentSha` when known) | false | no |
+| Invalid path 422 | 422 `PATH_INVALID` | false | no |
+| Confirmed oversized 422 / local > 1 MiB | 422 `CONTENT_TOO_LARGE` | false | no |
+| 429 rate limit | 429 `RATE_LIMITED` | true | yes, when validated |
+| 403 + `x-ratelimit-remaining: 0` | 429 `RATE_LIMITED` | true | yes, when validated |
+| GitHub 5xx | 502 `GITHUB_UNAVAILABLE` | true | no |
+| Network/transport failure | 502 `GITHUB_UNAVAILABLE` | true | no |
+| Unexpected internal failure | 500 `INTERNAL_ERROR` | false | no |
+
+Error-envelope compatibility: the standard `{ error: { code, message, retryable, status, … } }` shape is unchanged; `retryAfterSeconds` and `currentSha` are optional additive fields.
+
+### 7. Session-invalidation policy
+
+Unchanged and re-verified: only a definitive GitHub 401 invalidates the session, identically for GET/POST/PUT and repository authorization; rate limits, ordinary 403s, 5xx, network failures, and validation errors preserve the session (tested with follow-up requests succeeding under the same cookie). OAuth flow, token-refresh rotation, and refresh-token semantics untouched; a rate-limited authorization is not treated as authorized and does not invalidate the session.
+
+### 8. SHA conflict and create-collision
+
+Unchanged from Task 4.4: stale `expectedSha` → `409 SHA_CONFLICT` with `error.currentSha`; one read-only refetch on a concurrent-write 409; no write retry; no fabricated `currentSha` when the refetch fails; `FILE_EXISTS` for create collisions; no automatic merging.
+
+### 9. Network, 5xx, and write safety
+
+Network/transport failures and GitHub 5xx → `502 GITHUB_UNAVAILABLE` (retryable, session preserved); unexpected exceptions → `500 INTERNAL_ERROR`. Responses carry no tokens, raw Octokit text, stack traces, Markdown, or private repository details. POST/PUT are never automatically retried after network or rate-limit failures (a rate-limited PUT records zero write attempts; the client decides via an explicit user-driven retry later).
+
+### 10. Regression tests added (27 new; baseline 729 → 756)
+
+- `tests/unit/shared/errors.test.ts` (+11, new `mapGithubHttpError — Retry-After propagation (Task 4.5)` group): valid whole-second delays `0`/`30`/`86400` carried with the retryable contract intact; untrustworthy inputs (`undefined`, `-1`, `0.5`, `NaN`, `Infinity`, `86401`) omit the field; every non-rate-limit mapping omits it; the envelope stays backward-compatible (no key present when there is no delay).
+- `tests/unit/server/content-adapter.test.ts` (+6, `it.each`): upstream `retry-after` normalization through `upstreamError()` — lowercase and capitalized header names, `'42'` → 42, `'0'` → 0, and `''`/`'abc'`/`'1.5'`/`'999999999999'` → field absent.
+- `tests/unit/server/content-endpoint.test.ts` (+10, new `content endpoint — Retry-After propagation (Task 4.5, integration)` group; the harness `get()`/`put()` helpers now expose response headers): mocked 429 with `Retry-After: 30` → HTTP 429 `RATE_LIMITED`, `retry-after: '30'` header, `error.retryAfterSeconds: 30`, session preserved (follow-up read 200); rate-limited 403 (`X-RateLimit-Remaining: 0`, `Retry-After: 45`) → 429 with the header; absent upstream timing → no header and no field; each of `'', 'abc', '-5', '1.5', '999999999999'` → no header; an ordinary 403 with an incidental `Retry-After` stays 403 `REPO_NOT_ALLOWED` with no header and a preserved session; a rate-limited PUT → 429 with `retry-after: '75'`, zero write attempts (no retry), session preserved.
+
+All 27 scenarios from the task's required list are covered: pre-existing tests establish 1–6, 11–27 (401/session, ordinary 403, rate-limited 403, 404, `FILE_EXISTS`, `SHA_CONFLICT`, `currentSha`, no-fabrication, conservative 422, local oversize, 5xx, network, retryable flags, unchanged success paths, no credential leakage, session preservation, no auto-retry); the new tests add scenario 7–10 coverage at all three layers plus the write-no-retry and ordinary-403 edge cases.
+
+### 11. Verification gates (2026-11-15)
+
+| Gate | Result |
+|---|---|
+| `npm ci` | exit 0 (clean install, 0 vulnerabilities) |
+| `npm run lint` | exit 0, 0 warnings |
+| `npm run typecheck` | exit 0 (web + server) |
+| `npm run test` | **756/756** across 21 files (729 existing + 27 new; none removed or weakened) |
+| `npm run build` | exit 0 |
+| `npm run build:server` | exit 0 |
+| `npm run test:e2e` | **10/10** passing |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing length warnings in `specs/github-connection/spec.md`, unchanged) |
+| `git diff --check` | clean |
+
+No new dependencies; Node 24/26 compatibility preserved.
+
+### 12. Local verification (no live GitHub writes)
+
+Backend (`npm run dev:server`, 127.0.0.1:3000) and frontend (`npm run dev`, localhost:5173) run locally in the unconfigured state. The server logs the expected `session_storage_unavailable` / `auth_not_configured` warnings without crashing; structured request logs remain sanitized (route templates, no tokens, no upstream details). Browser: the GitDatNote UI loads in the safe "Not connected to GitHub" state, the sample preview renders sample Markdown through the safe pipeline (marked + DOMPurify; no iframes or raw forms), and no console errors appear. Unauthenticated `GET /api/repos/example/blog/content?path=test.md` → `401 UNAUTHORIZED`; unauthenticated `PUT` with a full JSON body → `401 UNAUTHORIZED` before any content client is constructed. `Retry-After` behavior verified only through the mocked HTTP integration tests above — no real GitHub quota was exhausted. Both servers stopped cleanly; no process left running.
+
+### 13. Known limitations
+
+- The `Retry-After` header is emitted only when the upstream provides a validated whole-second delay; GitHub's rate-limit responses typically include one, but when absent the response is intentionally header-free (no invented countdown).
+- HTTP-date-form `Retry-After` values are not supported (only numeric seconds), matching the numeric-only upstream contract used by the adapter.
+- The 2 pre-existing `openspec validate` length warnings in `specs/github-connection/spec.md` predate this task and are unrelated.
+
+### 14. Scope notes and task boundary
+
+- No changes to status mapping, session policy, refresh policy, OAuth, CSRF, repository authorization, the Task 4.1 adapter's operation semantics, or the local 1 MiB validation beyond the additions in §4.
+- Tasks 4.6–4.8 not started: no dedicated UTF-8 round-trip milestone, no broad integration matrix, no retry UI states or countdowns, no automatic GitHub write retries, no backoff/queue, no new editor components, no publishing/deployment features.
+- Staged/committed/pushed: none — this work awaits independent source review.
+- The working-tree change set for Task 4.5 is exactly: `src/shared/types.ts`, `src/shared/errors.ts`, `src/server/middleware/errorHandling.ts`, `src/server/content/index.ts`, `tests/unit/shared/errors.test.ts`, `tests/unit/server/content-adapter.test.ts`, `tests/unit/server/content-endpoint.test.ts`, `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry. Unrelated local `.hermes/skills/` modifications and untracked files remain preserved and untouched.

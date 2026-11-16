@@ -571,6 +571,34 @@ describe('readContent', () => {
       'GITHUB_UNAVAILABLE',
     );
   });
+
+  it.each([
+    ['retry-after', '42', 42],
+    ['Retry-After', '0', 0],
+    ['retry-after', '', undefined],
+    ['retry-after', 'abc', undefined],
+    ['retry-after', '1.5', undefined],
+    ['retry-after', '999999999999', undefined],
+  ])(
+    'normalizes a %s header of %s into retryAfterSeconds %p',
+    async (headerName, value, expected) => {
+      const a = adapter(createMock({
+        getContent: () => {
+          throw httpError(429, { [headerName]: value });
+        },
+      }).client, 'Journal');
+      const err = await expectAdapterError(
+        () => a.readContent(OWNER, REPO, 'post.md'),
+        'RATE_LIMITED',
+      );
+      if (expected === undefined) {
+        expect(err.detail.retryAfterSeconds).toBeUndefined();
+      } else {
+        expect(err.detail.retryAfterSeconds).toBe(expected);
+      }
+      expect(err.detail.retryable).toBe(true);
+    },
+  );
 });
 
 /* ------------------------------------------------------------------ */

@@ -177,6 +177,44 @@ describe('mapGithubHttpError — rate-limit message hints', () => {
   });
 });
 
+describe('mapGithubHttpError — Retry-After propagation (Task 4.5)', () => {
+  it.each([0, 30, 86_400])(
+    'carries a whole-second delay of %i as the optional structured field',
+    (retryAfterSeconds) => {
+      const detail = mapGithubHttpError(429, { retryAfterSeconds });
+      expect(detail.retryAfterSeconds).toBe(retryAfterSeconds);
+      expect(detail.retryable).toBe(true);
+      expect(detail.status).toBe(429);
+      expect(detail.code).toBe('RATE_LIMITED');
+    },
+  );
+
+  it.each([undefined, -1, 0.5, NaN, Infinity, 86_401])(
+    'omits the structured field for untrustworthy timing %p',
+    (retryAfterSeconds) => {
+      const detail = mapGithubHttpError(429, { retryAfterSeconds });
+      expect(detail.retryAfterSeconds).toBeUndefined();
+      // The retryable contract is preserved either way.
+      expect(detail.retryable).toBe(true);
+    },
+  );
+
+  it('omits the structured field on every non-rate-limit mapping', () => {
+    expect(mapGithubHttpError(401).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubHttpError(403).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubHttpError(404).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubHttpError(409).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubHttpError(422).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubHttpError(502).retryAfterSeconds).toBeUndefined();
+    expect(mapGithubNetworkError().retryAfterSeconds).toBeUndefined();
+  });
+
+  it('keeps the envelope backward-compatible: no key for details without a delay', () => {
+    const detail = mapGithubHttpError(429);
+    expect(Object.keys(detail)).toEqual(['code', 'message', 'retryable', 'status']);
+  });
+});
+
 describe('mapGithubNetworkError', () => {
   it('maps a request that never answered to GITHUB_UNAVAILABLE (retryable)', () => {
     expect(mapGithubNetworkError()).toEqual({

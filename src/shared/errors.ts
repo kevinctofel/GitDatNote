@@ -34,6 +34,28 @@ export const ERROR_CODES: Readonly<
   INTERNAL_ERROR: { status: 500, retryable: false },
 };
 
+/**
+ * Upper bound (seconds) for a trustworthy `Retry-After` delay (task 4.5).
+ * 24 hours: anything larger is almost certainly corrupted or adversarial,
+ * and surfacing it would be misleading.
+ */
+export const MAX_RETRY_AFTER_SECONDS = 86_400;
+
+/**
+ * Whether a value is a trustworthy `Retry-After` delay: a whole number of
+ * seconds within `[0, MAX_RETRY_AFTER_SECONDS]`. Non-integer, negative,
+ * non-finite, and oversized values are rejected so that no invalid or
+ * unsafe HTTP header value can ever be emitted.
+ */
+export function isValidRetryAfterSeconds(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_RETRY_AFTER_SECONDS
+  );
+}
+
 /** Default client-safe message for each error code. */
 export const SAFE_MESSAGES: Readonly<Record<ErrorDomain, string>> = {
   UNAUTHORIZED: 'Your session is no longer valid. Please sign in again.',
@@ -135,10 +157,22 @@ export function mapGithubNetworkError(): ErrorDetail {
 function rateLimitedDetail(context: GithubErrorContext): ErrorDetail {
   const { retryAfterSeconds } = context;
   const message =
-    typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0
+    typeof retryAfterSeconds === 'number' &&
+    Number.isFinite(retryAfterSeconds) &&
+    retryAfterSeconds >= 0 &&
+    retryAfterSeconds <= MAX_RETRY_AFTER_SECONDS
       ? `${SAFE_MESSAGES.RATE_LIMITED} Try again in about ${Math.round(retryAfterSeconds)} seconds.`
       : SAFE_MESSAGES.RATE_LIMITED;
-  return errorDetail('RATE_LIMITED', message);
+  const detail = errorDetail('RATE_LIMITED', message);
+  // Task 4.5: carry the delay as a structured field only when it is a
+  // whole number of seconds, so the HTTP layer can surface a
+  // standards-compatible `Retry-After` header. Fractional values keep
+  // the rounded message hint (existing behavior) but no structured
+  // field, and no header.
+  if (isValidRetryAfterSeconds(retryAfterSeconds)) {
+    return { ...detail, retryAfterSeconds };
+  }
+  return detail;
 }
 
 /** Wrap an `ErrorDetail` in the standard API error response body. */

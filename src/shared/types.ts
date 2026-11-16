@@ -95,6 +95,14 @@ export interface ErrorDetail {
   /** Whether the client should offer a retry (UI retry button). */
   retryable: boolean;
   status: ErrorStatus;
+  /**
+   * Optional validated rate-limit delay in whole seconds (task 4.5).
+   * Present only on `RATE_LIMITED` details when the upstream supplied a
+   * trustworthy delay; the HTTP layer surfaces it as a `Retry-After`
+   * response header. Optional and backward-compatible: existing
+   * envelopes omit the field entirely.
+   */
+  retryAfterSeconds?: number;
 }
 
 /** The standard API error response body. */
