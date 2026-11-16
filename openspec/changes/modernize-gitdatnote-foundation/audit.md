@@ -1614,3 +1614,87 @@ Local verification (no live GitHub writes): backend and frontend run locally in 
 ### Task boundary (Tasks 4.4–4.8 not started)
 
 No PUT content handler, no `SHA_CONFLICT` HTTP response, no dedicated UTF-8 round-trip milestone, no comprehensive integration matrix, no retry UI. The working tree change set for Task 4.3 is exactly: `src/server/index.ts` (route + handler + `readCreateBody`), `tests/unit/server/content-endpoint.test.ts` (17 tests), `openspec/changes/modernize-gitdatnote-foundation/tasks.md`, and this audit entry.
+
+## Task 4.4 — SHA-protected repository content update endpoint (2026-11-15)
+
+### 1. Endpoint and dispatch
+
+New route: `PUT /api/repos/{owner}/{repo}/content`, registered in `src/server/index.ts`. Dispatch (in the existing content-surface branch):
+
+1. `matchContentRepositoryRef(pathname)` recognizes the content surface (unchanged).
+2. `isContentUpdate` is true only for `PUT` on exactly `/api/repos/{owner}/{repo}/content`; the file path, new content, the required `expectedSha`, and an optional commit message arrive in a JSON body, relative to the content root.
+3. `enforceContentBoundary` is called with `requiredAccess: 'write'`, so the Task 3.4 boundary enforces the full user-plus-App decision before the handler runs.
+4. The CSRF gate (Task 3.3) runs before the boundary for this state-changing request (centralized boundary: `POST`/`PUT`/`DELETE` under `/api/` require session authentication plus the session-bound CSRF token before any handler executes).
+5. When authorized, `handleContentUpdate` runs with the exact session state the authorization decision used — including the refreshed access token when a refresh was needed; when denied, the boundary has already written the safe error response and the handler never executes.
+6. Every other state-changing method+path on the content surface (other methods on the content path, content sub-paths) has no registered handler yet and receives the standard 404 after passing write authorization (unchanged from Task 4.3; later tasks).
+
+### 2. Handler (`handleContentUpdate` in `src/server/index.ts`)
+
+- Body reading: reuses Task 4.3's `readCreateBody` unchanged (3 MiB hard cap `CREATE_BODY_MAX_BYTES`, single settle): `'too_large'` → safe `422 CONTENT_TOO_LARGE` envelope, then the connection is dropped only after the response's `finish` (the oversized body is never parsed or written upstream); `'aborted'` (premature close/error, including a body closed short of its declared `Content-Length`) → no response at all (the socket is already gone); `'ok'` → a complete body.
+- Body shape: unparseable JSON, non-object/array payload, missing/non-string `path`/`content`/`expectedSha`, or a present non-string `message` (including explicit `null`) → `422 PATH_INVALID` (safe envelope) before any content client is constructed. Accepted messages are normalized by the adapter (CRLF runs → single spaces, trimmed, 200-char cap).
+- Client construction: `contentClientFactory(session.credentials.accessToken)` — exactly one client per request, constructed after body validation; boundary-denied and body-rejected requests never construct a client.
+- Delegation: `createContentAdapter({ client, contentRoot: DEFAULT_CONTENT_ROOT })`, then `adapter.updateContent(owner, repo, path, content, expectedSha, message)` — the entire SHA-protected update is delegated to the Task 4.1 adapter; the handler never calls the GitHub Contents API directly.
+- Commit metadata: no fabricated committer/author — fields omitted so GitHub attributes the commit to the authenticated token owner (design decision A-05, same rule as Task 4.3); default message `Update {relativePath}`.
+- Error mapping mirrors `handleContentRead`/`handleContentCreate`: `ContentAdapterError` → shared safe `ErrorDetail` envelope; a definitive GitHub 401 invalidates the session through the established session-storage mechanism (`session_invalidated` warning); 403 (`REPO_NOT_ALLOWED`) and 429 (`RATE_LIMITED`) never do; unexpected non-adapter errors fail closed with safe `500 INTERNAL_ERROR`.
+- Success: `200` with the updated file's `{ path, sha }` (the new blob SHA).
+
+### 3. SHA protection and conflict semantics (adapter, unchanged from Task 4.1)
+
+Verified against `src/server/content/index.ts` (`updateContent`): `expectedSha` is validated with `isBlobSha` → `422 PATH_INVALID` before any GitHub request; a missing file or directory → `404 FILE_NOT_FOUND`; a SHA mismatch (the file's current SHA ≠ `expectedSha`) → `409 SHA_CONFLICT` via `shaConflictDetail(currentSha)`, carrying the file's current SHA; a concurrent-update 409 from the write triggers exactly one read-only refetch (never a write retry) to report the concurrent SHA.
+
+### 4. Test suite (`tests/unit/server/content-endpoint.test.ts`)
+
+19 Task 4.4 integration tests in a new `content endpoint — file update (integration)` group (the file now holds 72 tests), fully mocked via the injected `contentClientFactory` (no real GitHub credentials, tokens, or repositories — ephemeral ports, mocked fetch, temp SQLite, injected clock):
+
+1. 200 update: new blob SHA returned as `{ path, sha }`, exactly one client construction, the upstream write carries the expected SHA, default `Update note.md` message.
+2. Explicit commit message honored after normalization (`'  Fix typo\r\nsecond  '` → `'Fix typo second'`).
+3. Stale `expectedSha` → `409 SHA_CONFLICT` including the current SHA.
+4. Missing path → `404 FILE_NOT_FOUND` without writing.
+5. Directory path → `404 FILE_NOT_FOUND` without writing.
+6. Concurrent-update 409 from the write → `409 SHA_CONFLICT` after one read-only refetch — driven by a stateful upstream sequence (pre-check read → `BLOB_SHA`, write → 409, refetch → `OTHER_SHA`) asserting `error.currentSha` equals the refetched `OTHER_SHA`, exactly one write attempt, and exactly two upstream reads.
+7. Missing `expectedSha` → `422 PATH_INVALID`, never builds a content client.
+8. Malformed `expectedSha` → `422 PATH_INVALID` before any upstream request.
+9. Invalid path (traversal / absolute / backslash) → `422 PATH_INVALID` before any upstream request.
+10. Exactly 1 MiB of content accepted; content over 1 MiB → `422 CONTENT_TOO_LARGE`.
+11. Malformed bodies (unparseable JSON, non-object payload, missing/non-string fields) → `422 PATH_INVALID`, never builds a content client.
+12. Present non-string `message` (`null`, number, boolean, array, object) → `422 PATH_INVALID`, never builds a client.
+13. Over-cap request body → `422 CONTENT_TOO_LARGE`, never builds a client.
+14. Upstream 403/429/502/network mapped without invalidating the session.
+15. Definitive upstream 401 invalidates the session (a follow-up `PUT` → `401 UNAUTHORIZED`).
+16. Malformed write payload fails closed `500 INTERNAL_ERROR`.
+17. CSRF and write-authorization boundary denials (unauthenticated, missing CSRF token, read-only repository) with zero client construction.
+18. Client built from the refreshed access token when the stored token is near expiry.
+19. Conflict whose read-only refetch fails (upstream 500) → `409 SHA_CONFLICT` without a fabricated `currentSha`, exactly one write attempt, exactly two reads, and no session invalidation (a follow-up read with the same session cookie still 200s).
+
+### 4a. Review correction (2026-11-15) — strengthened conflict coverage and evidence classification
+
+Independent review approved the production PUT implementation, security boundaries, adapter reuse, and response handling; one test correction was applied (no production-handler changes).
+
+1. **Concurrent-update regression test strengthened.** The 409 test no longer serves the same SHA from both reads. The fixture gained a minimal stateful `readSequence` field on the existing `ContentFixture` (each upstream contents read returns the next entry in order; the mock client's `getContent` dispatches it, and `setContentFixture` resets the sequence index — no separate mock system). The test now drives: pre-check read → `BLOB_SHA`; update write → HTTP 409; read-only refetch → `OTHER_SHA`; endpoint → HTTP 409 `SHA_CONFLICT` with `error.currentSha` equal to `OTHER_SHA` (proving the value came from the refetch, not the pre-check); exactly one update attempt (the recorded write carries the caller's `BLOB_SHA`); exactly two upstream reads; no write retry.
+2. **Failed-refetch conflict covered at the HTTP level.** New endpoint test: pre-check read → `BLOB_SHA`; update write → 409; read-only refetch fails with a 500. Asserts: HTTP 409 `SHA_CONFLICT`; no fabricated `currentSha` in the error envelope; exactly one update attempt (no second write, no automatic retry); exactly two upstream reads; and no unexpected session invalidation — the failed refetch is a 500, not a definitive 401, so a follow-up read with the same session cookie still 200s (same session-persistence pattern as the established 403/429/5xx mapping tests).
+3. **Evidence classification** (correcting any implication that all conflict scenarios are independently exercised by the new HTTP tests):
+
+   - **Verified by the new HTTP endpoint tests** (`tests/unit/server/content-endpoint.test.ts`, Task 4.4 group, 19 tests): the full endpoint surface — dispatch reachability of `PUT` on the exact content path, CSRF/boundary denial outcomes with zero client construction, body-shape and over-cap rejection, the 1 MiB boundary, `200` success shape, `404` missing file/directory, stale-SHA `409` with `currentSha`, concurrent-update `409` with the refetched `currentSha` (stateful sequence), failed-refetch `409` without `currentSha`, upstream 403/429/5xx/network mapping, session invalidation only on definitive 401, malformed write payload fail-closed `500`, and refreshed-token client construction.
+   - **Verified by existing Task 4.1 adapter tests** (`tests/unit/server/content-adapter.test.ts`, 50 tests): the adapter-internal contract under the same scenarios — SHA pre-check mismatch, the 409 race refetch semantics (exactly one read-only refetch, `currentSha` from the second read; test `on a 409 race, refetches once read-only and reports the current SHA`), the failed-refetch race (test `on a 409 race whose refetch fails, still reports SHA_CONFLICT (no write retry)` — no `currentSha`, reads = 2, writes = 1), missing file, over-size, empty path, malformed write response. The HTTP layering (status codes, envelope shape, session-invalidation semantics) is what the endpoint tests add on top.
+   - **Established by source review, not explicitly tested:** the exact dispatch ordering (centralized CSRF gate → write boundary → `handleContentUpdate`); that the adapter never sends author/committer fields (the mock records only `path`/`message`/`content`/`sha`, so omitted metadata fields are verified by inspecting `updateContent`'s `createOrUpdateFileContents` call); and the internal stream mechanics of `readCreateBody`'s single-settle (its HTTP-level outcomes — over-cap 422, aborted no-response — are tested; the stream internals come from Task 4.3's review).
+
+Suite totals after the correction: 72 tests in `content-endpoint.test.ts` (19 in the Task 4.4 group); 729/729 Vitest overall (710 existing + 19 new).
+
+### 5. Verification gates (2026-11-15)
+
+`npm run lint` 0; `npm run typecheck` 0 (web + server); `npm run test` 729/729 across 21 files (710 existing + 19 new Task 4.4 tests, no existing test removed or weakened); `npm run build` 0; `npm run build:server` 0; `npm run test:e2e` 10/10; `npm audit` 0 vulnerabilities; `openspec validate modernize-gitdatnote-foundation` valid; `git diff --check` clean.
+
+Local verification (no live GitHub writes): backend (127.0.0.1:3996) and the Vite frontend (localhost:5173) run locally in the unconfigured state — the server logs the expected `session_storage_unavailable` / `auth_not_configured` warnings without crashing; an unauthenticated `PUT /api/repos/{owner}/{repo}/content` returns `401 UNAUTHORIZED` before any content client is constructed (the request log carries the sanitized route template, 0 ms); the Task 4.3 unauthenticated `POST` regression still returns 401; the browser loads the app and the GitDatNote shell renders in the safe unconfigured connection state (no visual editing interface — this task is backend API only). Both servers stopped cleanly (SIGTERM, `shutdown` logged); no server process left running.
+
+### 6. Scope notes
+
+- No changes to session encryption, OAuth, CSRF, token refresh, the Task 4.1 adapter, or the Task 4.2 read / Task 4.3 create endpoints.
+- No PUT sub-paths, no DELETE, no additional content endpoints; no visual editing interface.
+- Tasks 4.5–4.8 not started: full HTTP error-mapping layer, dedicated UTF-8 round-trip milestone, comprehensive mocked integration matrix, safe retry UI states; `tasks.md` leaves 4.5–4.8 unchecked.
+- Staged/committed/pushed: none — this work awaits independent source review.
+
+### Task boundary (Tasks 4.5–4.8 not started)
+
+No full HTTP error-mapping layer, no dedicated UTF-8 round-trip milestone, no comprehensive integration matrix, no retry UI. The working-tree change set for Task 4.4 is exactly: `src/server/index.ts` (dispatch branch + `handleContentUpdate`, +147/−10), `tests/unit/server/content-endpoint.test.ts` (new `file update (integration)` group, 19 tests; file now 2425 lines), `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (Task 4.4 checkbox + evidence), and this audit entry.
+
+No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `8718120`. Unrelated local changes (modified and untracked `.hermes/skills/` files) preserved untouched.

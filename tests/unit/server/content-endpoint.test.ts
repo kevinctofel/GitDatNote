@@ -201,6 +201,14 @@ interface ContentFixture {
     readonly status?: number;
     readonly data?: unknown;
   };
+  /**
+   * Task 4.4 review correction: stateful upstream read sequence. When
+   * set, each contents read returns the next entry in order (the last
+   * entry repeats if more reads arrive); it takes precedence over
+   * `data` and `status`. An entry is a `data`-style payload object, or
+   * a number making the read throw that HTTP status.
+   */
+  readonly readSequence?: Array<UpstreamData | number>;
 }
 
 interface Harness {
@@ -212,11 +220,17 @@ interface Harness {
   readonly factoryTokens: string[];
   /** Full repository paths requested from the mock content client, in order. */
   readonly requestedPaths: string[];
-  /** Create-write params handed to the mock client, in order. */
+  /**
+   * Write params handed to the mock client (Task 4.3 create writes and
+   * Task 4.4 update writes), in order. `sha` is present only for the
+   * Task 4.4 update writes, which are protected by an expected SHA.
+   */
   readonly createdCalls: Array<{
     path: string;
     message: string;
     content: string;
+    /** The expected SHA an update write was protected with. */
+    sha?: string;
   }>;
   setContentFixture(fixture: ContentFixture): void;
 }
@@ -250,8 +264,10 @@ async function createHarness(): Promise<Harness> {
     path: string;
     message: string;
     content: string;
+    sha?: string;
   }> = [];
   let fixture: ContentFixture = {};
+  let readsServed = 0;
   const contentClientFactory = (accessToken: string): ContentClient => {
     factoryTokens.push(accessToken);
     return {
@@ -265,6 +281,16 @@ async function createHarness(): Promise<Harness> {
             requestedPaths.push(params.path);
             if (fixture.networkFailure) {
               throw new TypeError('fetch failed');
+            }
+            if (fixture.readSequence !== undefined) {
+              const entry = fixture.readSequence[
+                Math.min(readsServed, fixture.readSequence.length - 1)
+              ];
+              readsServed += 1;
+              if (typeof entry === 'number') {
+                throw httpError(entry);
+              }
+              return { data: entry };
             }
             if (fixture.status !== undefined) {
               throw httpError(fixture.status, fixture.headers ?? {});
@@ -281,11 +307,13 @@ async function createHarness(): Promise<Harness> {
             path: string;
             message: string;
             content: string;
+            sha?: string;
           }): Promise<{ data: unknown }> {
             createdCalls.push({
               path: params.path,
               message: params.message,
               content: params.content,
+              sha: params.sha,
             });
             const create = fixture.create;
             if (create === undefined) {
@@ -314,6 +342,7 @@ async function createHarness(): Promise<Harness> {
     createdCalls,
     setContentFixture: (f: ContentFixture): void => {
       fixture = f;
+      readsServed = 0;
     },
   };
   harnesses.push(harness);
@@ -509,6 +538,34 @@ async function post(
   if (csrf !== undefined) headers['X-CSRF-Token'] = csrf;
   const res = await fetch(h.base + path, {
     method: 'POST',
+    headers,
+    body: rawBody,
+  });
+  const body = await res.text();
+  let json: unknown = null;
+  try {
+    json = JSON.parse(body);
+  } catch {
+    json = null;
+  }
+  return { status: res.status, body, json, code: codeOf(json) };
+}
+
+/** Like `post`, but with the PUT method (Task 4.4 update endpoint). */
+async function put(
+  h: Harness,
+  path: string,
+  cookie?: string,
+  csrf?: string,
+  rawBody: string = '{}',
+): Promise<{ status: number; body: string; json: unknown; code: string | undefined }> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (cookie !== undefined) headers.cookie = cookie;
+  if (csrf !== undefined) headers['X-CSRF-Token'] = csrf;
+  const res = await fetch(h.base + path, {
+    method: 'PUT',
     headers,
     body: rawBody,
   });
@@ -1751,6 +1808,618 @@ describe('content endpoint — credentials (integration)', () => {
       expect(line).not.toContain(ACCESS_TOKEN);
       expect(line).not.toContain(REFRESH_TOKEN);
       expect(line).not.toContain(CLIENT_SECRET);
+    }
+  });
+});
+
+/* 9) File update (Task 4.4) — SHA-protected PUT */
+describe('content endpoint — file update (integration)', () => {
+  it('updates an existing file: 200 with the relative path and the new blob SHA', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+        create: { sha: NEW_SHA },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(res.json).toEqual({ path: 'note.md', sha: NEW_SHA });
+      expect(h.factoryTokens).toEqual([ACCESS_TOKEN]);
+      expect(h.requestedPaths).toEqual(['src/posts/note.md']);
+      expect(h.createdCalls).toEqual([
+        {
+          path: 'src/posts/note.md',
+          message: 'Update note.md',
+          content: Buffer.from('# new').toString('base64'),
+          sha: BLOB_SHA,
+        },
+      ]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('uses the normalized explicit commit message when one is provided', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+        create: { sha: NEW_SHA },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+          message: '  Fix typo\r\nsecond  ',
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(h.createdCalls[0]?.message).toBe('Fix typo second');
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a stale expectedSha with 409 SHA_CONFLICT including the current SHA', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# other', OTHER_SHA) },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(409);
+      expect(res.code).toBe('SHA_CONFLICT');
+      const error = (res.json as { error: Record<string, unknown> }).error;
+      expect(error.currentSha).toBe(OTHER_SHA);
+      expect(h.createdCalls).toEqual([]);
+      expect(h.requestedPaths).toEqual(['src/posts/note.md']);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a missing path with 404 FILE_NOT_FOUND without writing', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({ data: {} });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(404);
+      expect(res.code).toBe('FILE_NOT_FOUND');
+      expect(h.createdCalls).toEqual([]);
+      expect(h.requestedPaths).toEqual(['src/posts/note.md']);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a directory path with 404 FILE_NOT_FOUND without writing', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/2026': [dirEntry('index.md', 'file', BLOB_SHA, 1)] },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: '2026',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(404);
+      expect(res.code).toBe('FILE_NOT_FOUND');
+      expect(h.createdCalls).toEqual([]);
+      expect(h.requestedPaths).toEqual(['src/posts/2026']);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('maps a concurrent-update 409 from the write to 409 SHA_CONFLICT after one read-only refetch', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      // Stateful upstream sequence: the pre-check read sees BLOB_SHA,
+      // the update write races a concurrent update (409), and the one
+      // read-only refetch observes the concurrent writer's OTHER_SHA.
+      h.setContentFixture({
+        readSequence: [
+          fileFixture('# old', BLOB_SHA),
+          fileFixture('# concurrent', OTHER_SHA),
+        ],
+        create: { status: 409 },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(409);
+      expect(res.code).toBe('SHA_CONFLICT');
+      // The current SHA must come from the refetch (OTHER_SHA), not the
+      // pre-check (BLOB_SHA).
+      const error = (res.json as { error: Record<string, unknown> }).error;
+      expect(error.currentSha).toBe(OTHER_SHA);
+      // Exactly one update attempt, protected with the caller's SHA —
+      // no write retry after the conflict.
+      expect(h.createdCalls).toEqual([
+        {
+          path: 'src/posts/note.md',
+          message: 'Update note.md',
+          content: Buffer.from('# new').toString('base64'),
+          sha: BLOB_SHA,
+        },
+      ]);
+      // Exactly two upstream reads: the pre-check plus one refetch.
+      expect(h.requestedPaths).toEqual(['src/posts/note.md', 'src/posts/note.md']);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('reports 409 SHA_CONFLICT without a fabricated currentSha when the post-conflict refetch fails, and keeps the session valid', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      // Pre-check read passes with BLOB_SHA, the update write races
+      // (409), and the one read-only refetch fails with a 500: the
+      // conflict must still be reported, without inventing a current
+      // SHA and without retrying the write.
+      h.setContentFixture({
+        readSequence: [fileFixture('# old', BLOB_SHA), 500],
+        create: { status: 409 },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({
+          path: 'note.md',
+          content: '# new',
+          expectedSha: BLOB_SHA,
+        }),
+      );
+      expect(res.status).toBe(409);
+      expect(res.code).toBe('SHA_CONFLICT');
+      const error = (res.json as { error: Record<string, unknown> }).error;
+      expect('currentSha' in error).toBe(false);
+      // One update attempt (no second write, no automatic retry)...
+      expect(h.createdCalls).toEqual([
+        {
+          path: 'src/posts/note.md',
+          message: 'Update note.md',
+          content: Buffer.from('# new').toString('base64'),
+          sha: BLOB_SHA,
+        },
+      ]);
+      // ...and exactly two upstream reads (pre-check + failed refetch).
+      expect(h.requestedPaths).toEqual(['src/posts/note.md', 'src/posts/note.md']);
+      // The failed refetch was a 500, not a definitive 401: the session
+      // stays valid — a follow-up read with the same cookie still 200s.
+      h.setContentFixture({
+        data: { 'src/posts': [dirEntry('note.md', 'file', BLOB_SHA, 4)] },
+      });
+      const followup = await get(h, CONTENT_URL, cookie);
+      expect(followup.status).toBe(200);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a missing expectedSha with 422 PATH_INVALID and never builds a content client', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: '# new' }),
+      );
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('PATH_INVALID');
+      expect(h.factoryTokens).toEqual([]);
+      expect(h.requestedPaths).toEqual([]);
+      expect(h.createdCalls).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a malformed expectedSha with 422 PATH_INVALID before any upstream request', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+      });
+      for (const badSha of ['not-a-sha', 'a'.repeat(39), '', 'a'.repeat(41)]) {
+        const res = await put(
+          h,
+          CONTENT_URL,
+          cookie,
+          csrf,
+          JSON.stringify({ path: 'note.md', content: '# new', expectedSha: badSha }),
+        );
+        expect(res.status).toBe(422);
+        expect(res.code).toBe('PATH_INVALID');
+      }
+      // One local client per request — the SHA check rejects before any
+      // upstream request, so no path is ever requested.
+      expect(h.factoryTokens.length).toBe(4);
+      expect(h.requestedPaths).toEqual([]);
+      expect(h.createdCalls).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects an invalid path with 422 PATH_INVALID before any upstream request', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+      });
+      for (const badPath of ['../escape.md', '/absolute.md', '2026\\secret.md', '']) {
+        const res = await put(
+          h,
+          CONTENT_URL,
+          cookie,
+          csrf,
+          JSON.stringify({ path: badPath, content: '# new', expectedSha: BLOB_SHA }),
+        );
+        expect(res.status).toBe(422);
+        expect(res.code).toBe('PATH_INVALID');
+      }
+      // One local client per request — path validation rejects before any
+      // upstream request, so no path is ever requested.
+      expect(h.factoryTokens.length).toBe(4);
+      expect(h.requestedPaths).toEqual([]);
+      expect(h.createdCalls).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('accepts exactly 1 MB of content and rejects content over 1 MB with 422 CONTENT_TOO_LARGE', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+        create: { sha: NEW_SHA },
+      });
+      const exact = 'x'.repeat(1024 * 1024);
+      const ok = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: exact, expectedSha: BLOB_SHA }),
+      );
+      expect(ok.status).toBe(200);
+      const over = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: exact + 'x', expectedSha: BLOB_SHA }),
+      );
+      expect(over.status).toBe(422);
+      expect(over.code).toBe('CONTENT_TOO_LARGE');
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects malformed bodies with 422 PATH_INVALID and never builds a content client', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      const rawBodies = [
+        'not json at all',
+        '["an","array"]',
+        'null',
+        JSON.stringify({ path: 7, content: 'x', expectedSha: BLOB_SHA }),
+        JSON.stringify({ content: 'x', expectedSha: BLOB_SHA }),
+        JSON.stringify({ path: 'n.md', content: 'x' }),
+        JSON.stringify({ path: 'n.md', content: 'x', expectedSha: 7 }),
+      ];
+      for (const rawBody of rawBodies) {
+        const res = await put(h, CONTENT_URL, cookie, csrf, rawBody);
+        expect(res.status).toBe(422);
+        expect(res.code).toBe('PATH_INVALID');
+      }
+      expect(h.factoryTokens).toEqual([]);
+      expect(h.requestedPaths).toEqual([]);
+      expect(h.createdCalls).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects a present non-string message with 422 PATH_INVALID and never builds a client', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      const badMessages: unknown[] = [null, 7, true, [], {}];
+      for (const message of badMessages) {
+        const res = await put(
+          h,
+          CONTENT_URL,
+          cookie,
+          csrf,
+          JSON.stringify({ path: 'n.md', content: 'x', expectedSha: BLOB_SHA, message }),
+        );
+        expect(res.status).toBe(422);
+        expect(res.code).toBe('PATH_INVALID');
+      }
+      expect(h.factoryTokens).toEqual([]);
+      expect(h.requestedPaths).toEqual([]);
+      expect(h.createdCalls).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('rejects an over-cap request body with 422 CONTENT_TOO_LARGE and never builds a client', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      const rawBody = JSON.stringify({
+        path: 'big.md',
+        content: 'x'.repeat(3 * 1024 * 1024),
+        expectedSha: BLOB_SHA,
+      });
+      const res = await put(h, CONTENT_URL, cookie, csrf, rawBody);
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('CONTENT_TOO_LARGE');
+      expect(h.factoryTokens).toEqual([]);
+      expect(h.requestedPaths).toEqual([]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('maps upstream errors without invalidating the session', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      const cases = [
+        { fixture: { data: {}, status: 403 }, status: 403, code: 'REPO_NOT_ALLOWED' },
+        { fixture: { data: {}, status: 429 }, status: 429, code: 'RATE_LIMITED' },
+        { fixture: { data: {}, status: 502 }, status: 502, code: 'GITHUB_UNAVAILABLE' },
+        { fixture: { data: {}, networkFailure: true }, status: 502, code: 'GITHUB_UNAVAILABLE' },
+      ];
+      for (const { fixture, status, code } of cases) {
+        h.setContentFixture(fixture);
+        const res = await put(
+          h,
+          CONTENT_URL,
+          cookie,
+          csrf,
+          JSON.stringify({ path: 'note.md', content: '# new', expectedSha: BLOB_SHA }),
+        );
+        expect(res.status).toBe(status);
+        expect(res.code).toBe(code);
+      }
+      const s = await get(h, '/api/session', cookie);
+      expect(s.status).toBe(200);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('invalidates the session on a definitive upstream 401', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({ data: {}, status: 401 });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: '# new', expectedSha: BLOB_SHA }),
+      );
+      expect(res.status).toBe(401);
+      expect(res.code).toBe('UNAUTHORIZED');
+      // Session invalidated: a follow-up update is unauthenticated.
+      const followup = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: '# new', expectedSha: BLOB_SHA }),
+      );
+      expect(followup.status).toBe(401);
+      expect(followup.code).toBe('UNAUTHORIZED');
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('fails closed with 500 INTERNAL_ERROR when the write payload is malformed', async () => {
+    const h = await createHarness();
+    try {
+      const cookie = await completeSignin(h);
+      const csrf = await csrfTokenFor(h, cookie);
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+        create: { data: { content: 'not-an-object' } },
+      });
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: '# new', expectedSha: BLOB_SHA }),
+      );
+      expect(res.status).toBe(500);
+      expect(res.code).toBe('INTERNAL_ERROR');
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
+    }
+  });
+
+  it('enforces the CSRF and write-authorization boundaries with zero client construction', async () => {
+    // Unauthenticated.
+    let h = await createHarness();
+    let res = await put(h, CONTENT_URL);
+    expect(res.status).toBe(401);
+    expect(res.code).toBe('UNAUTHORIZED');
+    expect(h.factoryTokens).toEqual([]);
+    await closeHarness(h);
+
+    // Authenticated but missing the CSRF token.
+    h = await createHarness();
+    const cookie = await completeSignin(h);
+    res = await put(h, CONTENT_URL, cookie);
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('CSRF_INVALID');
+    expect(h.factoryTokens).toEqual([]);
+    await closeHarness(h);
+
+    // Write CSRF-validated but a read-only repository.
+    h = await createHarness();
+    const writeCookie = await completeSignin(h);
+    const csrf = await csrfTokenFor(h, writeCookie);
+    res = await put(
+      h,
+      `/api/repos/${LOGIN}/docs/content`,
+      writeCookie,
+      csrf,
+      JSON.stringify({ path: 'n.md', content: 'x', expectedSha: BLOB_SHA }),
+    );
+    expect(res.status).toBe(403);
+    expect(res.code).toBe('REPO_NOT_ALLOWED');
+    expect(h.factoryTokens).toEqual([]);
+    expect(h.createdCalls).toEqual([]);
+    await closeHarness(h);
+  });
+
+  it('builds the client from the refreshed access token when the stored token is near expiry', async () => {
+    const h = await createHarness();
+    try {
+      // Sign-in stores a token that expires in 30 seconds — inside the
+      // 60-second refresh safety window — so the boundary must refresh
+      // before authorizing, and the handler must build its client from the
+      // refreshed credential.
+      const cookie = await completeSignin(h, {
+        tokenResponses: [
+          { ...TOKEN_RESPONSE, expires_in: 30 },
+          {
+            access_token: REFRESHED_ACCESS_TOKEN,
+            refresh_token: REFRESHED_REFRESH_TOKEN,
+            expires_in: 28800,
+            refresh_token_expires_in: 15897600,
+            token_type: 'bearer',
+            scope: 'repo',
+          },
+        ],
+      });
+      h.setContentFixture({
+        data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
+        create: { sha: NEW_SHA },
+      });
+      const csrf = await csrfTokenFor(h, cookie);
+      const res = await put(
+        h,
+        CONTENT_URL,
+        cookie,
+        csrf,
+        JSON.stringify({ path: 'note.md', content: '# new', expectedSha: BLOB_SHA }),
+      );
+      expect(res.status).toBe(200);
+      expect(h.factoryTokens).toEqual([REFRESHED_ACCESS_TOKEN]);
+      await closeHarness(h);
+    } finally {
+      await closeHarness(h);
     }
   });
 });

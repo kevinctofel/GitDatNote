@@ -258,20 +258,21 @@ export function createApp(options: AppOptions = {}): Server {
           handleLogout(res, authDeps, csrf.sessionId);
           return;
         }
-        // Task 3.4 / 4.3: state-changing content operations pass the CSRF
-        // boundary above, then the repository authorization boundary with
-        // write access — authorization never substitutes for CSRF, and CSRF
-        // never substitutes for authorization.
+        // Task 3.4 / 4.3 / 4.4: state-changing content operations pass the
+        // CSRF boundary above, then the repository authorization boundary
+        // with write access — authorization never substitutes for CSRF, and
+        // CSRF never substitutes for authorization.
         const contentRef = matchContentRepositoryRef(pathname);
         if (contentRef !== null) {
-          // Task 4.3: POST on exactly /api/repos/{owner}/{repo}/content is
-          // the file-creation endpoint. Only that exact method+path invokes
-          // the create handler; every other state-changing request on the
+          // Task 4.3 / 4.4: POST on exactly /api/repos/{owner}/{repo}/content
+          // is the file-creation endpoint, and PUT on that same path is the
+          // file-update endpoint. Only those exact method+path pairs invoke
+          // their handlers; every other state-changing request on the
           // content surface has no registered handler yet (later tasks) and
           // receives the standard 404 after passing write authorization.
-          const isContentCreate =
-            method === 'POST' &&
-            pathname === `/api/repos/${contentRef.owner}/${contentRef.repo}/content`;
+          const contentEndpointPath = `/api/repos/${contentRef.owner}/${contentRef.repo}/content`;
+          const isContentCreate = method === 'POST' && pathname === contentEndpointPath;
+          const isContentUpdate = method === 'PUT' && pathname === contentEndpointPath;
           void enforceContentBoundary(req, res, contentRef, 'write', authDeps, logger).then(
             (outcome) => {
               if (!outcome.authorized) {
@@ -280,6 +281,16 @@ export function createApp(options: AppOptions = {}): Server {
               }
               if (isContentCreate) {
                 void handleContentCreate(req, res, contentRef, outcome.session, {
+                  authDeps,
+                  logger,
+                  contentClientFactory,
+                }).catch((err: unknown) => {
+                  sendUnexpectedError(res, logger, err);
+                });
+                return;
+              }
+              if (isContentUpdate) {
+                void handleContentUpdate(req, res, contentRef, outcome.session, {
                   authDeps,
                   logger,
                   contentClientFactory,
@@ -701,6 +712,132 @@ async function handleContentCreate(
   }
 
   res.writeHead(201, JSON_HEADERS);
+  res.end(JSON.stringify(result));
+}
+
+/**
+ * Task 4.4 — handler for `PUT /api/repos/{owner}/{repo}/content`
+ * (file update).
+ *
+ * Invoked only after the centralized CSRF gate and the Task 3.4/3.5 write
+ * boundary returned an authorized outcome, so `session` is the exact
+ * session state (including a refreshed access token when one was needed)
+ * the authorization decision was made against. Request body (JSON):
+ *
+ *   { "path": "2026/note.md", "content": "# Updated", "expectedSha": "a1b2…", "message": "…" }
+ *
+ * `path` is relative to the configured content root; `expectedSha` is
+ * REQUIRED — the SHA of the file revision this update is based on;
+ * `message` is optional (the adapter defaults it to `Update {path}`).
+ * Success is 200 with the updated file's `{ path, sha }`.
+ *
+ * The handler performs only request-body handling. The SHA-protected
+ * update (validating the expected SHA, the existence pre-check, the
+ * mismatch check, and the upstream write) all happens inside the Task 4.1
+ * content adapter (`updateContent`). The adapter reports a missing path as
+ * `404 FILE_NOT_FOUND`, a SHA mismatch as `409 SHA_CONFLICT` carrying the
+ * file's current SHA in the shared `ShaConflictErrorDetail` envelope, and a
+ * concurrent-update 409 from GitHub (one read-only refetch, never a write
+ * retry) as `409 SHA_CONFLICT`. This handler never calls the GitHub
+ * Contents API directly, never fabricates committer metadata (design
+ * decision A-05), and never overwrites a newer revision.
+ *
+ * Body-shape failures (unparseable JSON, a non-object payload, a
+ * missing/non-string `path`/`content`/`expectedSha`, or a present
+ * non-string `message` — including explicit null) are rejected with 422
+ * `PATH_INVALID` before any client is constructed. A missing or malformed
+ * `expectedSha` is additionally rejected by the adapter's `isBlobSha`
+ * validation (422) before any GitHub request. An aborted or incomplete
+ * upload settles the body reader as 'aborted' and is answered with nothing
+ * (the socket is already gone). A body over the size cap is rejected with
+ * 422 `CONTENT_TOO_LARGE`.
+ *
+ * Error contract mirrors `handleContentCreate`: adapter failures are the
+ * shared safe `ErrorDetail` envelope; a definitive GitHub 401 invalidates
+ * the session; 403 and 429 never do.
+ */
+async function handleContentUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ref: ContentRepositoryRef,
+  session: StoredSession,
+  deps: {
+    readonly authDeps: AuthRouteDeps;
+    readonly logger: Logger;
+    readonly contentClientFactory: (accessToken: string) => ContentClient;
+  },
+): Promise<void> {
+  const { authDeps, logger, contentClientFactory } = deps;
+
+  const raw = await readCreateBody(req);
+  if (!raw.ok) {
+    if (raw.reason === 'too_large') {
+      sendJsonError(res, errorDetail('CONTENT_TOO_LARGE'));
+      res.once('finish', () => req.destroy());
+    }
+    // 'aborted': the client hung up mid-body; the socket is already gone.
+    return;
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.text);
+  } catch {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  const fields = payload as Record<string, unknown>;
+  const path = fields.path;
+  const content = fields.content;
+  const expectedSha = fields.expectedSha;
+  const message = fields.message;
+  if (
+    typeof path !== 'string' ||
+    typeof content !== 'string' ||
+    typeof expectedSha !== 'string'
+  ) {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+  // `message` is optional: accepted only when omitted or a string.
+  if (message !== undefined && typeof message !== 'string') {
+    sendJsonError(res, errorDetail('PATH_INVALID'));
+    return;
+  }
+
+  const client = contentClientFactory(session.credentials.accessToken);
+  const adapter = createContentAdapter({ client, contentRoot: DEFAULT_CONTENT_ROOT });
+
+  let result: { path: string; sha: string };
+  try {
+    result = await adapter.updateContent(
+      ref.owner,
+      ref.repo,
+      path,
+      content,
+      expectedSha,
+      message,
+    );
+  } catch (err) {
+    if (err instanceof ContentAdapterError) {
+      if (err.detail.code === 'UNAUTHORIZED') {
+        if (authDeps.session !== null) {
+          authDeps.session.storage.deleteSession(session.sessionId);
+        }
+        logger.warn({ event: 'session_invalidated', reason: 'github_401' });
+      }
+      sendJsonError(res, err.detail);
+      return;
+    }
+    sendUnexpectedError(res, logger, err);
+    return;
+  }
+
+  res.writeHead(200, JSON_HEADERS);
   res.end(JSON.stringify(result));
 }
 
