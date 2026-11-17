@@ -984,32 +984,81 @@ describe('updateContent', () => {
  */
 function createStatefulMock() {
   const files = new Map<string, { payload: string; sha: string }>();
+  // Task 4.7: directory state (path -> blob SHA) so listings derive from
+  // the stored repository state, including directories created by writes.
+  const dirs = new Map<string, string>();
   const written: Array<{ payload: string; sha: string; expectedSha?: string }> = [];
   const readPayloads: string[] = [];
+  // Task 4.7 (review fix): upstream request log — every getContent
+  // invocation, including 404s and directory listings. readPayloads only
+  // counts successfully served file payloads; getContentCalls counts
+  // upstream requests regardless of outcome.
+  const getContentCalls: string[] = [];
   let counter = 0;
   const nextSha = (): string => {
     counter += 1;
     return counter.toString(16).padStart(40, '0');
   };
+  const ensureDir = (dirPath: string): void => {
+    let acc = '';
+    for (const seg of dirPath.split('/')) {
+      acc = acc === '' ? seg : `${acc}/${seg}`;
+      if (!dirs.has(acc)) {
+        dirs.set(acc, nextSha());
+      }
+    }
+  };
   const client: ContentClient = {
     rest: {
       repos: {
         getContent: async (params) => {
+          // Record every upstream invocation immediately (404s and
+          // directory listings included), before any branch.
+          getContentCalls.push(params.path);
           const entry = files.get(params.path);
-          if (entry === undefined) {
-            throw httpError(404);
+          if (entry !== undefined) {
+            readPayloads.push(entry.payload);
+            return {
+              data: {
+                type: 'file',
+                name: params.path.split('/').pop() ?? 'roundtrip.md',
+                sha: entry.sha,
+                size: Buffer.from(entry.payload, 'base64').byteLength,
+                encoding: 'base64',
+                content: entry.payload,
+              },
+            };
           }
-          readPayloads.push(entry.payload);
-          return {
-            data: {
-              type: 'file',
-              name: params.path.split('/').pop() ?? 'roundtrip.md',
-              sha: entry.sha,
-              size: Buffer.from(entry.payload, 'base64').byteLength,
-              encoding: 'base64',
-              content: entry.payload,
-            },
-          };
+          if (dirs.has(params.path)) {
+            // Directory listing: immediate children derived from stored
+            // state (files plus sub-directories), sorted by name.
+            const prefix = `${params.path}/`;
+            const children: Array<{ name: string; type: string; sha: string; size: number }> = [];
+            for (const [filePath, fileEntry] of files) {
+              if (filePath.startsWith(prefix)) {
+                const rest = filePath.slice(prefix.length);
+                if (!rest.includes('/')) {
+                  children.push({
+                    name: rest,
+                    type: 'file',
+                    sha: fileEntry.sha,
+                    size: Buffer.from(fileEntry.payload, 'base64').byteLength,
+                  });
+                }
+              }
+            }
+            for (const [dirPath, dirSha] of dirs) {
+              if (dirPath.startsWith(prefix)) {
+                const rest = dirPath.slice(prefix.length);
+                if (!rest.includes('/')) {
+                  children.push({ name: rest, type: 'dir', sha: dirSha, size: 0 });
+                }
+              }
+            }
+            children.sort((a, b) => a.name.localeCompare(b.name));
+            return { data: children };
+          }
+          throw httpError(404);
         },
         createOrUpdateFileContents: async (params) => {
           const existing = files.get(params.path);
@@ -1021,6 +1070,10 @@ function createStatefulMock() {
             throw httpError(409);
           }
           const sha = nextSha();
+          const parent = params.path.slice(0, params.path.lastIndexOf('/'));
+          if (parent !== '') {
+            ensureDir(parent);
+          }
           files.set(params.path, { payload: params.content, sha });
           written.push({
             payload: params.content,
@@ -1032,7 +1085,7 @@ function createStatefulMock() {
       },
     },
   };
-  return { client, files, written, readPayloads };
+  return { client, files, dirs, written, readPayloads, getContentCalls };
 }
 
 /**
@@ -1167,6 +1220,107 @@ describe('Task 4.6 — UTF-8 round-trip (stateful mock)', () => {
     expect(Buffer.from(file.content, 'utf8').equals(Buffer.from(updatedText, 'utf8'))).toBe(true);
     expect(file.sha).toBe(updated.sha);
     expect(file.size).toBe(Buffer.byteLength(updatedText, 'utf8'));
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Task 4.7 — stateful cross-operation integration scenarios           */
+/* ------------------------------------------------------------------ */
+
+describe('Task 4.7 — stateful integration scenarios', () => {
+  // Scenario C: create → duplicate create → read.
+  it('create → duplicate create → read: the collision preserves stored bytes and sends no second write', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    const original = '# original\n\nbody line';
+    const created = await a.createContent(OWNER, REPO, '2026/Nov/dup.md', original);
+    await expectAdapterError(
+      () => a.createContent(OWNER, REPO, '2026/Nov/dup.md', 'other content'),
+      'FILE_EXISTS',
+    );
+    // The pre-create existence check served the stored payload; the
+    // duplicate attempt itself sent no write at all.
+    expect(mock.written).toHaveLength(1);
+    const file = await a.readContent(OWNER, REPO, '2026/Nov/dup.md');
+    expect(mock.readPayloads).toHaveLength(2);
+    expect(mock.readPayloads[0]).toBe(mock.written[0].payload);
+    expect(mock.readPayloads[1]).toBe(mock.written[0].payload);
+    expect(file.content).toBe(original);
+    expect(Buffer.from(file.content, 'utf8').equals(Buffer.from(original, 'utf8'))).toBe(true);
+    expect(file.sha).toBe(created.sha);
+  });
+
+  // Scenario D: create → read → update → stale update → read.
+  it('create → read → update → stale update → read: the stale update reports the stored current SHA and preserves content', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    const first = '# first version';
+    const updatedText = '# second version';
+    const created = await a.createContent(OWNER, REPO, '2026/Nov/flow.md', first);
+    const read = await a.readContent(OWNER, REPO, '2026/Nov/flow.md');
+    expect(read.sha).toBe(created.sha);
+    const updated = await a.updateContent(OWNER, REPO, '2026/Nov/flow.md', updatedText, read.sha);
+    expect(updated.sha).not.toBe(created.sha);
+    expect(mock.written).toHaveLength(2);
+    expect(mock.written[1].expectedSha).toBe(created.sha);
+    // Stale update carrying the original SHA: rejected before any write.
+    const err = await expectAdapterError(
+      () => a.updateContent(OWNER, REPO, '2026/Nov/flow.md', '# third version', created.sha),
+      'SHA_CONFLICT',
+    );
+    expect(mock.written).toHaveLength(2);
+    expect(shaConflictCurrentSha(err)).toBe(updated.sha);
+    const after = await a.readContent(OWNER, REPO, '2026/Nov/flow.md');
+    expect(after.content).toBe(updatedText);
+    expect(after.sha).toBe(updated.sha);
+    // Four reads: initial read, pre-update SHA check, stale pre-update
+    // SHA check, and this final read serving the recorded update payload.
+    expect(mock.readPayloads).toHaveLength(4);
+    expect(mock.readPayloads[3]).toBe(mock.written[1].payload);
+  });
+
+  // Scenario A: listing reflects stored state after a write.
+  it('listing reflects stored state: a created file appears in its parent directory with its stored SHA and size', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    const content = '# listing\n\n- item one\n- item two';
+    const created = await a.createContent(OWNER, REPO, '2026/Nov/listing.md', content);
+    const root = await a.listContent(OWNER, REPO, '');
+    expect(root.type).toBe('directory');
+    expect(root.path).toBe('');
+    // Only immediate children: the 2026 directory. 2026/Nov is not a root child.
+    expect(root.children).toHaveLength(1);
+    expect(root.children[0].name).toBe('2026');
+    expect(root.children[0].type).toBe('dir');
+    expect(typeof root.children[0].sha).toBe('string');
+    const nested = await a.listContent(OWNER, REPO, '2026/Nov');
+    expect(nested.path).toBe('2026/Nov');
+    expect(nested.children).toHaveLength(1);
+    expect(nested.children[0].name).toBe('listing.md');
+    expect(nested.children[0].type).toBe('file');
+    expect(nested.children[0].sha).toBe(created.sha);
+    expect(nested.children[0].size).toBe(Buffer.byteLength(content, 'utf8'));
+  });
+
+  // Scenario G: multi-byte Unicode counted by UTF-8 bytes, not JS length.
+  it('rejects multi-byte Unicode over the UTF-8 byte cap (JS string length under the cap) before any GitHub access', async () => {
+    const mock = createStatefulMock();
+    const a = adapter(mock.client, 'Journal');
+    // '你' is 3 UTF-8 bytes: 349,526 × 3 = 1,048,578 bytes (> 1 MiB), while
+    // the JS string length is only 349,526 — counting must use UTF-8 bytes.
+    const oversized = '你'.repeat(349526);
+    expect(Buffer.byteLength(oversized, 'utf8')).toBe(MAX_MARKDOWN_BYTES + 2);
+    expect(oversized.length).toBeLessThan(MAX_MARKDOWN_BYTES);
+    await expectAdapterError(
+      () => a.createContent(OWNER, REPO, 'big.md', oversized),
+      'CONTENT_TOO_LARGE',
+    );
+    // Zero upstream requests: assert on the full getContent call log —
+    // a 404 existence probe would be recorded there, while readPayloads
+    // only counts successfully served payloads.
+    expect(mock.getContentCalls).toHaveLength(0);
+    expect(mock.written).toHaveLength(0);
+    expect(mock.readPayloads).toHaveLength(0);
   });
 });
 

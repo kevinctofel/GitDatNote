@@ -984,6 +984,21 @@ describe('content endpoint — path validation (integration)', () => {
     expect(h.requestedPaths).toEqual([]);
   });
 
+  it('rejects null-byte paths with PATH_INVALID', async () => {
+    const h = await createHarness();
+    const cookie = await completeSignin(h);
+    for (const raw of ['a\u0000b.md', '2026\u0000Nov.md']) {
+      const res = await get(
+        h,
+        `${CONTENT_URL}?path=${encodeURIComponent(raw)}`,
+        cookie,
+      );
+      expect(res.status).toBe(422);
+      expect(res.code).toBe('PATH_INVALID');
+    }
+    expect(h.requestedPaths).toEqual([]);
+  });
+
   it('answers PATH_INVALID without leaking upstream data or credentials', async () => {
     const h = await createHarness();
     const cookie = await completeSignin(h);
@@ -1472,7 +1487,7 @@ describe('content endpoint — file creation (integration)', () => {
     const cookie = await completeSignin(h);
     const csrf = await csrfTokenFor(h, cookie);
     h.setContentFixture({ data: {}, create: {} });
-    for (const bad of ['../escape.md', '/absolute.md', '2026\\secret.md', '']) {
+    for (const bad of ['../escape.md', '/absolute.md', '2026\\secret.md', '', 'a\u0000b.md']) {
       const res = await post(
         h,
         CONTENT_URL,
@@ -2261,7 +2276,7 @@ describe('content endpoint — file update (integration)', () => {
       h.setContentFixture({
         data: { 'src/posts/note.md': fileFixture('# old', BLOB_SHA) },
       });
-      for (const badPath of ['../escape.md', '/absolute.md', '2026\\secret.md', '']) {
+      for (const badPath of ['../escape.md', '/absolute.md', '2026\\secret.md', '', 'a\u0000b.md']) {
         const res = await put(
           h,
           CONTENT_URL,
@@ -2274,7 +2289,7 @@ describe('content endpoint — file update (integration)', () => {
       }
       // One local client per request — path validation rejects before any
       // upstream request, so no path is ever requested.
-      expect(h.factoryTokens.length).toBe(4);
+      expect(h.factoryTokens.length).toBe(5);
       expect(h.requestedPaths).toEqual([]);
       expect(h.createdCalls).toEqual([]);
       await closeHarness(h);
