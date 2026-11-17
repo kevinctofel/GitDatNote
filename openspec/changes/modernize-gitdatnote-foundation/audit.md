@@ -1978,4 +1978,140 @@ Pre-verification housekeeping: orphaned dev servers from the Task 4.6 smoke test
 - The 2 pre-existing `openspec validate` requirement-length warnings in `specs/github-connection/spec.md` predate this task.
 - Working-tree change set for Task 4.7: `tests/unit/server/content-adapter.test.ts`, `tests/unit/server/content-endpoint.test.ts`, `openspec/changes/modernize-gitdatnote-foundation/tasks.md` (4.7 marked complete), and this audit entry. No production-code changes. Unrelated `.hermes/skills/` modifications and untracked files remain preserved and untouched.
 - Staged/committed/pushed: none — this work awaits independent source review.
-- Task 4.8 (retry UI states) was **not** started and remains unchecked; no retry UI is claimed to exist.
+- Task 4.7 made no retry-UI changes; its implementation is recorded in the Task 4.8 section below.
+
+## Task 4.8 — Safe retry and conflict UI states
+
+**Status: complete (2026-11-17), including final-review corrections.** Baseline `f3d6f14` (Task 4.7), branch `feat/gitdatnote-2`. Verified from a clean `npm ci`.
+
+Final-review corrections (2026-11-17): invalid retry metadata is now truly omitted (no own `retryAfterSeconds` property) rather than left as `undefined`; a synchronous ref guard was added to the recovery component so rapid repeated clicks invoke the callback exactly once before React commits the disabled button; this audit was corrected to describe the implementation as it actually exists (no `useMemo`, no `timerKey`, no `aria-busy` container).
+
+### Existing UI retry behavior before this task
+
+- **Session load (`src/web/App.tsx`):** `GET /api/session` errors render the generic server message (`err.detail.message`) with a Retry button calling `loadConnection`. 401 details reconcile to the disconnected view instead of showing an error. Request-generation guard (`sessionRequestGenerationRef`) and stale-response suppression were already in place. `loadConnection` also re-renders the connected view on success.
+- **Repository discovery (`src/web/components/ConnectedView.tsx`):** `listRepositories` failures render the generic server message with a Retry button calling `loadRepos` (a dedicated, guarded, stale-suppressing operation). No other operation had a retry surface.
+- **Disconnect (`App.tsx`):** 403 `CSRF_INVALID` offers a session recheck (`recheckSession` → `GET /api/session`); other errors show the generic message with Retry. Preserved unchanged.
+- **Gaps:** no handling of `RATE_LIMITED` / `GITHUB_UNAVAILABLE` / `SHA_CONFLICT` anywhere in the React tree; no retry-timing presentation; no accessible error semantics (`role="alert"/"status"`); no pending-state communication on existing retry buttons; no SHA-conflict presentation (the editor does not exist yet). `ErrorDetail.retryAfterSeconds` was part of the shared type contract (Task 4.5) but the frontend parser never carried it through, and no frontend code ever read it.
+
+### Reusable error component
+
+New `src/web/components/ApiErrorRecovery.tsx` (typed, presentational, no app-state coupling):
+
+```ts
+interface ApiErrorRecoveryProps {
+  detail: ErrorDetail;          // the accepted shared contract — no second vocabulary
+  onRetry?: () => void;         // safe, idempotent retry of the failed operation
+  onReload?: () => void;        // fetch the latest repository version (editor hook)
+  pending?: boolean;            // parent-driven in-flight state
+}
+```
+
+- Each fixed message renders in a `<p role="alert">` inside a plain container `div`; the per-second countdown number sits in an `aria-live="off"` span inside that paragraph. The Retry/Reload controls are native buttons (keyboard accessible, visible focus ring via existing `:focus-visible` styles).
+- Fixed messages chosen from the known code; the upstream `detail.message` is **never** rendered as UI text — only code, validated timing, and safe callback presence shape the output.
+- Retryable unknown codes (e.g. `GITHUB_TIMEOUT`, `PENDING_REVIEW`, `REPO_NOT_ALLOWED`) get a generic "Something went wrong. You can try again." + Retry only when `onRetry` is supplied; non-retryable unknown codes get "Something went wrong. Please go back and try again." and **no** Retry button.
+- Pending state: when `pending` is true, the component renders a standalone `<p role="status">Retrying…</p>` in place of the action (no button); otherwise, while a recovery action is in flight, the action button is disabled.
+
+### Error-code-to-message mapping (exact strings)
+
+| `detail.code` | Message | Actions |
+|---|---|---|
+| `RATE_LIMITED` (valid timing) | `GitHub rate limit reached — try again in {n} seconds.` | Retry (disabled until expiry) |
+| `RATE_LIMITED` (no valid timing) | `GitHub rate limit reached — please try again shortly.` | Retry (enabled, explicit user action) |
+| `GITHUB_UNAVAILABLE` | `GitHub is unreachable — check your connection and retry.` | Retry iff `onRetry` supplied |
+| `SHA_CONFLICT` | `This file was modified by someone else — reload and try again.` | "Reload latest version" iff `onReload` supplied; **no Retry button, ever** |
+| other retryable | `Something went wrong. You can try again.` | Retry iff `onRetry` supplied |
+| other non-retryable | `Something went wrong. Please go back and try again.` | none |
+
+### Retry timing parsing and validation
+
+`src/web/api.ts` — new module-level `resolveRetryTiming(detail, res)`, called only when mapping a `RATE_LIMITED` detail (both envelope and bare shapes):
+
+- **Precedence (single rule):** a validated typed `error.retryAfterSeconds` JSON field wins; otherwise a validated numeric `Retry-After` HTTP header is used; otherwise no retry timing.
+- A JSON value that is present but invalid (negative, fractional, string, `null`, `NaN`, `> 86_400`, unexpected type) is **omitted entirely** from the returned detail — after the final-review correction the property does not exist (tests assert with `Object.hasOwn`), so no later code path can read or resurrect it.
+- Header validation: only strings matching `/^\d+$/` are accepted, bounded by the shared 0–86,400 validator; date strings, empty text, and non-numeric values are rejected. No arbitrary header text is ever trusted.
+- Success parsing is untouched; no other error code carries timing; `retryAfterSeconds` remains optional, so responses without it parse exactly as before.
+
+### Countdown semantics
+
+- Countdown initialization and cleanup both live in a `useEffect` keyed on the `detail` object: `deadline = Date.now() + seconds * 1000` is captured per error, and only the remaining whole seconds are stored in state — a replaced error always starts a fresh countdown.
+- A 1-second `window.setInterval` tick recomputes the remaining time from the absolute deadline (`Math.max(0, Math.ceil((deadline - Date.now()) / 1000))`), and a `visibilitychange` listener re-runs the tick so a backgrounded tab shows the correct remaining time.
+- The interval id is local to the effect (no timer ref): the effect's cleanup calls `window.clearInterval` on it and removes the `visibilitychange` listener. When the error is replaced, the effect re-runs, clearing the old timer and resetting `inFlight` and the remaining time — an old countdown can never enable the wrong operation.
+- While a positive delay remains, Retry is disabled and the countdown renders inside the alert paragraph's `aria-live="off"` span, so screen readers announce the state once rather than every tick.
+- If the validated delay is zero, the message switches to `GitHub rate limit reached — you can retry now.` and Retry is immediately enabled. If no timing exists, the message is "please try again shortly" and Retry is enabled immediately (explicit user action only).
+- **No auto-submit at zero, no background polling, no exponential backoff.**
+
+### Rate-limit retry behavior
+
+- Retry re-runs the exact failed operation via the parent's callback (`loadConnection` for session load, `loadRepos` for repository discovery). The existing generation guards and stale-response suppression in those callbacks prevent duplicate or out-of-order requests; the component adds its own in-flight guard on top — `inFlight` state plus a synchronous ref that flips immediately on the first click, so two rapid clicks in the same batch invoke the callback exactly once even before React commits the disabled button. The guard resets when the error detail is replaced.
+- A failed retry produces the new error detail (parent state), so the component re-renders with whatever the backend now says — no invented retry loops.
+
+### GitHub-unavailable retry behavior
+
+- `GITHUB_UNAVAILABLE` (mapped from network failures and non-JSON 5xx) shows the fixed message; Retry only when the failing operation supplies a safe callback.
+- **A 502/network failure is never treated as session loss:** no automatic disconnect, no sign-in redirect, no inference that the session expired. The session-error branch in `App.tsx` still reconciles definitive 401 to disconnected and keeps the CSRF session-recheck flow.
+
+### SHA-conflict reload semantics
+
+- `SHA_CONFLICT` renders the fixed message and, **only** when `onReload` is supplied, a "Reload latest version" button that calls `onReload` exactly once. There is no Retry button on this state — an automatic write resubmission is impossible by construction.
+- The component never calls any write operation, never replaces `expectedSha`, never fetches or merges content, and never clears surrounding user content (verified by test: unsaved text rendered outside the component is untouched).
+- No `onReload` → the guidance message shows with no button (no nonfunctional control).
+- The future editor is expected to pass an `onReload` that fetches the latest repository version; conflict merge/diff/overwrite UX remains an editor-workflow concern.
+
+### Prevention of automatic writes
+
+- The component contains zero write/PUT/POST calls; its only side effects are `onRetry` / `onReload` callbacks supplied by the parent.
+- Integration points pass only read/discovery operations (`loadConnection`, `loadRepos`), so even the Retry actions cannot write.
+- Test evidence: the SHA-conflict harness injects both `onRetry` (save) and `onReload`; Reload invokes `onReload` exactly once and `onRetry` zero times, and a double-click still yields exactly one `onReload` call.
+
+### Session and CSRF preservation
+
+- The session-error block in `App.tsx` now renders through `ApiErrorRecovery` with `onRetry={loadConnection}`: definitive 401 still reconciles to disconnected (unchanged code path, verified by hardening tests), transient failures show the safe retry state, and the existing request-generation guard still applies.
+- The disconnect flow in `App.tsx` was not touched: 403 `CSRF_INVALID` still offers session recheck, and a definitive session-lost response still reconciles to disconnected.
+- `ConnectedView.tsx` repository-error block now renders through `ApiErrorRecovery` with `onRetry={loadRepos}` (re-runs repository discovery only); repository selection, sample-preview mode, session-invalidation handling, and selection reconciliation are unchanged. Preview mode still never performs live repository requests.
+
+### Accessibility decisions
+
+- Messages use `role="alert"` semantics (assertive, appropriate for errors) on the message paragraph; the pending state uses a separate `role="status"` element; the per-second countdown sits in an `aria-live="off"` span, so screen readers hear the state once, not every tick.
+- Buttons are native and keyboard accessible; disabled controls use the standard `:disabled` styling plus the existing visible focus ring.
+- No color-only signaling: every state change is conveyed in text. No animations introduced, so reduced-motion preferences are unaffected by construction. Styling reuses the existing single stylesheet (`src/web/index.css`): three small rules for spacing/countdown, inheriting the app's existing light/dark `prefers-color-scheme` palette.
+
+### Test evidence
+
+- New `tests/web/api-error-recovery.test.tsx` (19 tests, fake timers): required messages for all three codes; no invented countdown without timing; invalid `retryAfterSeconds` values ignored (negative, fractional, over 24 h, wrong type); valid zero delay enables Retry immediately; Retry disabled while delay remains; pending retry cannot be submitted twice; two rapid clicks within the same React `act()` batch invoke the callback exactly once (synchronous guard); replacing the error resets the guard so the new recovery action works; accessible pending state; unmount clears the timer; a replaced error does not retain the previous countdown; unavailable message with and without callback; SHA conflict offers only Reload, invokes it exactly once, never triggers a save, shows no button without a callback; unsaved user content untouched; unknown retryable/non-retryable codes; untrusted upstream error text is never rendered.
+- Extended `tests/web/api.test.ts` (+20 tests): valid JSON field preferred over a stronger header; header fallback when the JSON field is absent; four invalid header forms (date string, non-numeric, negative, empty) ignored; seven invalid JSON forms (negative, fractional, string, null, NaN, over one day, object) ignored while falling back to a valid header; invalid-timing fallback **omits the `retryAfterSeconds` own property** (asserted with `Object.hasOwn`, not just `toBeUndefined`); invalid JSON timing with a valid header uses the validated header value; no timing when no source exists; bare (non-envelope) 429 shape parses validated timing; normal error mapping (non-rate-limit 502 envelope) and successful response parsing unchanged; network-failure mapping unchanged (no invented timing).
+- Updated three assertions in `tests/web/hardening.test.tsx` from `/try again/i` to `/retry/i`: the session-error and repository-loading retry buttons now render through `ApiErrorRecovery` with a "Retry" label (button behavior and guards unchanged; no test removed, skipped, or weakened).
+- Totals: **802 Vitest tests across 22 files** (baseline 763/21; +39 new), **10/10 Playwright** (baseline 10).
+
+### Verification results (all exit 0)
+
+- `npm ci` — clean install (only the standard, pre-existing build-script warning).
+- `npm run lint` — 0 problems.
+- `npm run typecheck` — clean (web + server projects).
+- `npm run test` — 802/802 passed across 22 files, 0 failures.
+- `npm run build` — success (only the pre-existing Vite `✓ built` output; no new warnings).
+- `npm run build:server` — clean `tsc` emit.
+- `npm run test:e2e` — 10/10 passed in 2.5 s.
+- `npm audit` — 0 vulnerabilities.
+- `openspec validate modernize-gitdatnote-foundation` — valid (2 pre-existing length warnings in `specs/github-connection/spec.md`, unchanged by this task).
+- `git diff --check` — clean.
+- Node 24 / Node 26 compatibility preserved: no new dependencies, no lockfile changes.
+
+### Local browser verification
+
+- Backend `npm run dev:server` + frontend `npm run dev` started; `GET /api/health` → 200; `GET http://localhost:5173` served the app (title "🐴 GitDatNote").
+- Disconnected state renders correctly ("Not connected to GitHub" + Connect GitHub button).
+- Sample connected-layout preview works: banner "Preview — sample data only", repository selector lists the three sample fixtures, selecting one renders the sample Markdown through the safe pipeline (0 `<script>` nodes in the article).
+- Repository selection, preview mode, and disconnect behavior unchanged; no console errors observed at any step (including a 375 px mobile-width check with no horizontal overflow).
+- Unauthenticated smoke: `curl -i http://127.0.0.1:3000/api/repos/example/blog/content?path=test.md` → **HTTP 401** `{"error":{"code":"UNAUTHORIZED",...}}` as expected.
+- Unavailable and conflict states were verified via the mocked component harness (Vitest), as no live GitHub operation is accessible in the unconfigured environment. No live GitHub connection was faked and no live content writes were made.
+- Both dev servers stopped cleanly (SIGTERM; ports 3000 and 5173 confirmed free).
+
+### Remaining editor-specific limitations
+
+- The article editor does not exist yet, so `onReload` has no production caller in this milestone; the component's SHA-conflict behavior is verified with injected callbacks only.
+- Content merging, diff viewing, overwrite confirmation, auto-save, and any conflict resolution UX are explicitly out of scope for Task 4.8 and belong to the future article-editor workflow.
+- The live rate-limit and outage states were exercised through the component harness and API-parser tests rather than a live GitHub outage (none was safely reproducible locally).
+
+### Phase 5
+
+Not started. All Phase 5 tasks remain unchecked.

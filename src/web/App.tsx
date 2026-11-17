@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiClient } from "./api";
 import type { ConnectionState } from "./types";
+import { ApiErrorRecovery } from "./components/ApiErrorRecovery";
 import { ConnectedView } from "./components/ConnectedView";
 import { DisconnectedView } from "./components/DisconnectedView";
 import { ErrorView } from "./components/ErrorView";
@@ -128,16 +129,14 @@ export function App({ client: clientProp }: AppProps = {}) {
         {connection.status === "error" && (
           <section aria-label="Connection problem">
             <h1>Connection problem</h1>
-            <p role="alert">{connection.detail.message}</p>
             <p>
               GitHub sign-in and note access are unavailable until the
               connection is restored.
             </p>
-            {connection.detail.retryable && (
-              <button type="button" onClick={loadConnection}>
-                Try again
-              </button>
-            )}
+            <ApiErrorRecovery
+              detail={connection.detail}
+              onRetry={loadConnection}
+            />
           </section>
         )}
 

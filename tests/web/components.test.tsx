@@ -46,7 +46,9 @@ describe("ConnectedView", () => {
     } as unknown as ApiClient;
     const { host, unmount } = await mount(<ConnectedView client={client} />);
     await flush();
-    expect(host.textContent ?? "").toMatch(/GitHub is unavailable\./);
+    expect(host.textContent ?? "").toMatch(
+      /GitHub is unreachable — check your connection and retry/i,
+    );
     const retry = Array.from(host.querySelectorAll("button")).find((b) =>
       /retry/i.test(b.textContent ?? ""),
     );
@@ -557,9 +559,13 @@ describe("App connection flow (task 3.6)", () => {
     const { host, unmount } = await mount(<App client={client} />);
     await settle();
     expect(host.textContent ?? "").toMatch(/Connection problem/i);
-    expect(host.textContent ?? "").toMatch(/GitHub is currently unavailable/i);
+    // Task 4.8: fixed, plain-language copy — the raw server message is not
+    // rendered.
+    expect(host.textContent ?? "").toMatch(
+      /GitHub is unreachable — check your connection and retry/i,
+    );
 
-    const retry = findButton(host, /try again/i)!;
+    const retry = findButton(host, /retry/i)!;
     await act(async () => {
       retry.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });

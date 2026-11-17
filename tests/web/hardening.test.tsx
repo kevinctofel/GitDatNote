@@ -86,7 +86,10 @@ describe("async request safety (hardening)", () => {
     const m = await mount(<ConnectedView client={client} />);
     await flush();
 
-    expect(m.host.textContent).toMatch(/unexpected response/i);
+    // Task 4.8: fixed, plain-language copy — the upstream message is not
+    // rendered.
+    expect(m.host.textContent).toMatch(/Something went wrong/i);
+    expect(m.host.textContent).not.toMatch(/unexpected response/i);
     const retry = Array.from(m.host.querySelectorAll("button")).find(
       (b) => /retry/i.test(b.textContent ?? ""),
     );
@@ -111,9 +114,11 @@ describe("async request safety (hardening)", () => {
     const m = await mount(<App client={client} />);
     await flush();
 
-    expect(m.host.textContent).toMatch(/GitHub is currently unavailable/i);
+    expect(m.host.textContent).toMatch(
+      /GitHub is unreachable — check your connection and retry/i,
+    );
     const retry = Array.from(m.host.querySelectorAll("button")).find(
-      (b) => /try again/i.test(b.textContent ?? ""),
+      (b) => /retry/i.test(b.textContent ?? ""),
     );
     expect(retry).toBeDefined();
     m.unmount();
@@ -160,7 +165,7 @@ describe("async request safety (hardening)", () => {
     expect(m.host.textContent).not.toMatch(/Not connected to GitHub/i);
     expect(m.host.textContent).not.toMatch(/boom: internal detail/);
     const retry = Array.from(m.host.querySelectorAll("button")).find(
-      (b) => /try again/i.test(b.textContent ?? ""),
+      (b) => /retry/i.test(b.textContent ?? ""),
     );
     expect(retry).toBeDefined();
     m.unmount();

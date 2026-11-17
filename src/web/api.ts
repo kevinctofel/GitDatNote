@@ -1,6 +1,7 @@
 import {
   errorDetail,
   ERROR_CODES,
+  isValidRetryAfterSeconds,
   mapGithubHttpError,
   mapGithubNetworkError,
 } from "../shared/errors";
@@ -224,9 +225,15 @@ export class ApiClient {
 async function errorDetailFromResponse(res: Response): Promise<ErrorDetail> {
   try {
     const body = (await res.json()) as unknown;
-    if (isErrorResponse(body)) return body.error;
+    // The standard `{ "error": ErrorDetail }` envelope. A `retryAfterSeconds`
+    // field may be present on RATE_LIMITED details; it is validated (or
+    // dropped) below before the detail is used.
+    if (isErrorResponse(body)) {
+      return resolveRetryTiming(body.error, res);
+    }
+    // The bare `ErrorDetail` body (auth routes / CSRF boundary).
     if (isBareErrorDetail(body)) {
-      return {
+      const detail: ErrorDetail = {
         code: body.code as ErrorDomain,
         message: body.message,
         retryable: body.retryable,
@@ -234,11 +241,53 @@ async function errorDetailFromResponse(res: Response): Promise<ErrorDetail> {
           ? body.status
           : mapGithubHttpError(res.status).status,
       };
+      if (isValidRetryAfterSeconds(body.retryAfterSeconds)) {
+        detail.retryAfterSeconds = body.retryAfterSeconds;
+      }
+      return resolveRetryTiming(detail, res);
     }
   } catch {
     /* non-JSON body: fall through to status-based mapping */
   }
-  return mapGithubHttpError(res.status);
+  return resolveRetryTiming(mapGithubHttpError(res.status), res);
+}
+
+/**
+ * Resolve validated retry timing for a `RATE_LIMITED` detail.
+ *
+ * Single precedence rule (task 4.8): the typed `error.retryAfterSeconds`
+ * JSON field wins when it passes the shared validator; otherwise a strictly
+ * whole-number `Retry-After` HTTP header may be used. Everything else —
+ * date strings, fractions, negatives, out-of-range values, unexpected
+ * types — is rejected, and the detail is returned without retry timing so
+ * the UI never shows an invented countdown.
+ *
+ * Non-`RATE_LIMITED` details are returned untouched: retry timing belongs
+ * to rate limiting only.
+ */
+function resolveRetryTiming(detail: ErrorDetail, res: Response): ErrorDetail {
+  if (detail.code !== "RATE_LIMITED") {
+    return detail;
+  }
+  if (isValidRetryAfterSeconds(detail.retryAfterSeconds)) {
+    return detail;
+  }
+  const header = res.headers.get("Retry-After");
+  if (
+    header !== null &&
+    /^\d+$/.test(header) &&
+    isValidRetryAfterSeconds(Number(header))
+  ) {
+    return { ...detail, retryAfterSeconds: Number(header) };
+  }
+  if (detail.retryAfterSeconds === undefined) {
+    return detail;
+  }
+  // The typed field is present but failed validation: omit the property
+  // entirely rather than trusting it or leaving an undefined own property.
+  const cleaned: ErrorDetail = { ...detail };
+  delete cleaned.retryAfterSeconds;
+  return cleaned;
 }
 
 function isErrorResponse(value: unknown): value is ErrorResponse {
@@ -264,6 +313,7 @@ type BareErrorDetail = {
   message: string;
   retryable: boolean;
   status?: number;
+  retryAfterSeconds?: unknown;
 };
 
 function isBareErrorDetail(value: unknown): value is BareErrorDetail {

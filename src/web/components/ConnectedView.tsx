@@ -5,6 +5,7 @@ import type { ErrorDetail, Repository } from "../../shared/types";
 import type { SessionState, SessionUser } from "../types";
 import { FIXTURE_REPOSITORIES } from "../fixtures";
 import { getPreviewMarkdown } from "../preview-overrides";
+import { ApiErrorRecovery } from "./ApiErrorRecovery";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { RepositorySelector } from "./RepositorySelector";
 
@@ -341,14 +342,7 @@ export function ConnectedView({
         )}
 
         {repos.status === "error" && (
-          <div role="alert">
-            <p>{repos.detail.message}</p>
-            {repos.detail.retryable && (
-              <button type="button" onClick={loadRepos}>
-                Retry
-              </button>
-            )}
-          </div>
+          <ApiErrorRecovery detail={repos.detail} onRetry={loadRepos} />
         )}
 
         {repos.status === "ready" && repos.repositories.length === 0 && (

@@ -376,3 +376,223 @@ describe("ApiClient.disconnectGithub (task 3.6)", () => {
     });
   });
 });
+
+// ---- Task 4.8: validated retry timing survives API parsing ----
+
+const RATE_BODY = {
+  error: {
+    code: "RATE_LIMITED",
+    message:
+      "The GitHub API rate limit was reached. Please try again shortly.",
+    retryable: true,
+    status: 429,
+  },
+};
+
+function jsonWithHeaders(
+  status: number,
+  body: unknown,
+  extra: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...extra },
+  });
+}
+
+async function captureApiError(promise: Promise<unknown>): Promise<ApiError> {
+  try {
+    await promise;
+  } catch (e) {
+    return e as ApiError;
+  }
+  throw new Error("expected the request to fail");
+}
+
+describe("ApiClient retry timing (task 4.8)", () => {
+  it("keeps a valid JSON retryAfterSeconds and prefers it over the header", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonWithHeaders(
+        429,
+        { error: { ...RATE_BODY.error, retryAfterSeconds: 45 } },
+        { "Retry-After": "999" },
+      ),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "RATE_LIMITED",
+      retryable: true,
+      status: 429,
+      retryAfterSeconds: 45,
+    });
+  });
+
+  it("falls back to a validated numeric Retry-After header when the JSON field is absent", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonWithHeaders(429, RATE_BODY, { "Retry-After": "30" }),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "RATE_LIMITED",
+      retryAfterSeconds: 30,
+    });
+  });
+
+  it.each([
+    ["a date string", "Wed, 21 Oct 2026 07:28:00 GMT"],
+    ["non-numeric text", "abc"],
+    ["a negative value", "-5"],
+    ["an empty value", ""],
+  ])("ignores an invalid Retry-After header (%s)", async (_label, header) => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonWithHeaders(429, RATE_BODY, { "Retry-After": header }),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail.code).toBe("RATE_LIMITED");
+    expect("retryAfterSeconds" in error.detail).toBe(false);
+  });
+
+  it.each([
+    ["a negative value", -5],
+    ["a fractional value", 0.5],
+    ["a string", "30"],
+    ["null", null],
+    ["NaN", NaN],
+    ["a delay over one day", 86_401],
+    ["an object", { seconds: 30 }],
+  ])(
+    "ignores an invalid JSON retryAfterSeconds (%s) and uses a valid header",
+    async (_label, value) => {
+      const fetch = vi.fn().mockResolvedValue(
+        jsonWithHeaders(
+          429,
+          { error: { ...RATE_BODY.error, retryAfterSeconds: value } },
+          { "Retry-After": "30" },
+        ),
+      );
+      const error = await captureApiError(new ApiClient(fetch).listRepositories());
+      expect(error.detail.code).toBe("RATE_LIMITED");
+      expect(error.detail.retryAfterSeconds).toBe(30);
+    },
+  );
+
+  // Focused regressions (final review): the invalid-timing fallback must
+  // omit the own property, not leave it set to undefined.
+  it("omits the `retryAfterSeconds` own property for invalid JSON timing with no valid header", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonWithHeaders(429, {
+        error: { ...RATE_BODY.error, retryAfterSeconds: "60" },
+      }),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail.code).toBe("RATE_LIMITED");
+    expect(Object.hasOwn(error.detail, "retryAfterSeconds")).toBe(false);
+  });
+
+  it("uses the validated header value when the JSON field is invalid", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      jsonWithHeaders(
+        429,
+        { error: { ...RATE_BODY.error, retryAfterSeconds: 86_401 } },
+        { "Retry-After": "45" },
+      ),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(Object.hasOwn(error.detail, "retryAfterSeconds")).toBe(true);
+    expect(error.detail.retryAfterSeconds).toBe(45);
+  });
+
+  it("leaves normal error mapping and successful responses unchanged", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        json(502, {
+          error: {
+            code: "GITHUB_UNAVAILABLE",
+            message: "GitHub is unreachable.",
+            retryable: true,
+            status: 502,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        json(200, [
+          {
+            owner: "acme",
+            name: "notes",
+            contentRoot: "Journal",
+            canRead: true,
+            canWrite: true,
+            private: false,
+          },
+        ]),
+      );
+    const client = new ApiClient(fetch);
+    const error = await captureApiError(client.listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "GITHUB_UNAVAILABLE",
+      retryable: true,
+      status: 502,
+    });
+    expect(Object.hasOwn(error.detail, "retryAfterSeconds")).toBe(false);
+    const repos = await client.listRepositories();
+    expect(repos[0].name).toBe("notes");
+  });
+
+  it("omits retry timing entirely when no validated source exists", async () => {
+    const fetch = vi.fn().mockResolvedValue(json(429, RATE_BODY));
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "RATE_LIMITED",
+      retryable: true,
+      status: 429,
+    });
+    expect("retryAfterSeconds" in error.detail).toBe(false);
+  });
+
+  it("parses validated timing from the bare (non-envelope) 429 shape", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      json(429, {
+        code: "RATE_LIMITED",
+        message: "rate limited",
+        retryable: true,
+        status: 429,
+        retryAfterSeconds: 12,
+      }),
+    );
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "RATE_LIMITED",
+      retryable: true,
+      retryAfterSeconds: 12,
+    });
+  });
+
+  it("leaves network-failure mapping unchanged (no invented timing)", async () => {
+    const fetch = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    const error = await captureApiError(new ApiClient(fetch).listRepositories());
+    expect(error.detail).toMatchObject({
+      code: "GITHUB_UNAVAILABLE",
+      retryable: true,
+      status: 502,
+    });
+    expect("retryAfterSeconds" in error.detail).toBe(false);
+  });
+
+  it("does not affect successful response parsing", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      json(200, [
+        {
+          owner: "acme",
+          name: "notes",
+          contentRoot: "Journal",
+          canRead: true,
+          canWrite: true,
+          private: false,
+        },
+      ]),
+    );
+    const repos = await new ApiClient(fetch).listRepositories();
+    expect(repos[0].name).toBe("notes");
+  });
+});
