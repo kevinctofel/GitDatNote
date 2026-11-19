@@ -2421,4 +2421,218 @@ later decision.
 
 ### Phase 5 status
 
-Task 5.1 complete. Tasks 5.2 and 5.3 remain unchecked and not started.
+Task 5.1 complete. Task 5.2 complete (below). Task 5.3 remains unchecked
+and unchanged.
+
+## Playwright E2E for connection flow and real HTTP content API — Task 5.2 (2026-11-19)
+
+### Scope and boundaries
+
+Task 5.2 adds Playwright coverage for the connection flow and the
+authenticated content API. Two new spec files under `tests/e2e/`; the
+existing 10 Markdown XSS tests are unchanged and still pass (full suite
+29/29). No production application changes: no authentication bypass hooks,
+no fake editor controls, no test-only endpoints. No outbound GitHub calls
+from any test — all upstream interactions are in-memory fixtures injected
+through the established seams. Task 5.3 is untouched.
+
+### Test architecture
+
+**`tests/e2e/connection-flow.spec.ts` (10 browser E2E tests)**
+
+- The real React app under the Playwright-managed Vite dev server (port
+  5173), headless Chromium, one worker, deterministic fixtures.
+- Browser API traffic is intercepted with `page.route`; fixtures return the
+  exact JSON shapes the API contract defines (`/api/session`,
+  `/api/repositories`), and per-endpoint call counters prove request
+  discipline (e.g., zero live repository/content requests while
+  disconnected).
+- The OAuth start is a top-level navigation intercepted with `page.route`
+  against a local labeled page — no real GitHub call.
+- StrictMode note: in the dev build, mount effects run twice, so
+  failure-path fixtures are *state-driven* (fail until the test observes
+  the error UI and clears the failure) and call-count assertions are
+  relative to the point of action — never index-based "the first call
+  fails".
+
+Test names:
+
+1. disconnected state shows the Connect GitHub action and starts one
+   top-level OAuth navigation
+2. labeled sample preview renders fixture data with no live content
+   requests
+3. connected session presents identity, safe avatar, and no credentials in
+   DOM or console
+4. repository discovery renders the list and a writable repository
+   selection
+5. switching repositories updates the metadata for private and read-only
+   access
+6. repository discovery failure shows a labeled recovery and a functional
+   retry
+7. a session-expired repository discovery reconciles to the disconnected
+   state without leaking the error code
+8. a CSRF-rejected logout keeps the connection, explains the failure, and
+   offers a session recheck
+9. an unrecoverable session probe failure shows a labeled connection
+   problem with a working retry
+10. the disconnected state issues no live repository or content requests
+
+**`tests/e2e/content-api.spec.ts` (9 real-HTTP tests)**
+
+- Per test file: a real `createApp` HTTP server bound to an ephemeral
+  localhost port, an isolated temporary SQLite session database (created in
+  a unique temp directory and removed in `afterAll` even on failure), and a
+  stateful in-memory upstream fixture (file → {content, sha, size}) that
+  implements read/list/create/update semantics contract-faithfully,
+  injected through the established `contentClientFactory` seam.
+- The actual HTTP request path is exercised end-to-end: routing,
+  cookie-based session authentication, CSRF enforcement, repository
+  authorization, and the content adapter.
+- Sign-in uses the app's own fake-OAuth path: `GET /api/auth/github/start`
+  → 302 → `GET /api/auth/github/callback?code=…&state=…` → 302, with the
+  session cookie captured in Playwright's `APIRequestContext`. No real
+  GitHub OAuth; the token is a fixed fake value.
+- All requests use Playwright's `APIRequestContext` — no Vitest assertions
+  or mocks in this suite.
+- **What is real:** the app's HTTP server, routing, session storage
+  (SQLite), CSRF enforcement, repository authorization, response encoding,
+  status codes, and the content adapter's request/response mapping.
+  **What is mocked:** the outbound GitHub layer above the injected content
+  client seam.
+
+Test names:
+
+1. authenticated read returns exact Unicode content, blob SHA, and UTF-8
+   size
+2. directory listing returns the content root and immediate children
+3. create with a valid CSRF returns 201 and performs exactly one upstream
+   write
+4. update with the current SHA returns 200 and the new blob SHA
+5. stale SHA update returns 409 SHA_CONFLICT with the current SHA and no
+   overwrite
+6. missing and invalid CSRF on POST and PUT returns 403 CSRF_INVALID
+   without writes
+7. a session survives CSRF rejections and unauthenticated attempts
+8. unauthorized repository read/write returns 403 REPO_NOT_ALLOWED with no
+   upstream operations
+9. no credentials leak in any sign-in or content response
+
+### Scenario-by-scenario coverage matrix
+
+Connection-flow scenarios (from the Task 5.2 brief):
+
+| Scenario | Browser E2E (`connection-flow.spec.ts`) | Real HTTP (`content-api.spec.ts`) | Existing Vitest | Future (editor-dependent) |
+|---|---|---|---|---|
+| 1. Disconnected state + Connect GitHub action | test 1 | — | — | — |
+| 2. Labeled sample preview, no live content requests | test 2 | — | — | — |
+| 3. Connected session presentation (intercepted `/api/session`) | test 3 | — | — | — |
+| 4. Repository discovery | test 4 | — | — | — |
+| 5. Writable/read-only repository selection | tests 4, 5 | — | — | — |
+| 6. Public/private repository metadata | tests 4, 5 | — | — | — |
+| 7. Switching between repositories | test 5 | — | — | — |
+| 8. Discovery error + functional retry | test 6 | — | — | — |
+| 9. Safe handling of unauthorized/session-expired responses | tests 7, 8, 9 | tests 7, 8 | — | — |
+| 10. No credentials in DOM or captured console | test 3 | test 9 | — | — |
+
+Content-API scenarios (real HTTP):
+
+| Scenario | Real HTTP (`content-api.spec.ts`) | Existing Vitest | Future (editor-dependent) |
+|---|---|---|---|
+| 1. Authenticated Markdown read: exact Unicode content, SHA, UTF-8 size | test 1 | — | Editor display flow |
+| 2. Directory listing | test 2 | — | Editor navigation flow |
+| 3. Create with correct CSRF: 201, exactly one write | test 3 | — | Editor create/save flow |
+| 4. Update with correct SHA: 200, updated SHA | test 4 | — | Editor save flow |
+| 5. Stale SHA: 409 `SHA_CONFLICT`, current SHA, no overwrite | test 5 | `tests/web/api-error-recovery.test.tsx` — required conflict text; Reload wired exclusively to the reload callback; no automatic save retry; no misleading Reload button without a callback | Full browser-driven editing → conflict → reload flow |
+| 6. Missing/invalid CSRF (POST, PUT): 403 `CSRF_INVALID`, no write | test 6 | — | — |
+| 7. Session remains valid after CSRF rejection | test 7 | — | — |
+| 8. Unauthorized repository read/write: 403, no upstream operations | test 8 | — | — |
+| 9. No unintended writes or credential leaks | tests 3, 6, 8, 9 | — | — |
+
+**Documented limitation:** a complete browser-driven editing conflict flow
+cannot yet be tested because the article editor has not been implemented.
+The HTTP-layer conflict behavior (409 `SHA_CONFLICT`, current SHA returned,
+no overwrite) is proven in real HTTP, and the UI component's conflict
+behavior is proven by the retained Vitest component tests. Only the
+in-browser end-to-end editing → save → conflict → reload wiring remains
+editor-dependent. Component tests are not described as browser E2E tests.
+No temporary editor, fake Save button, or production-only test hook was
+added to cover the gap.
+
+### Verification (2026-11-19, Node 26, same toolchain as Task 5.1)
+
+- `npx playwright test tests/e2e/connection-flow.spec.ts` — 10/10 passed.
+- `npx playwright test tests/e2e/content-api.spec.ts` — 9/9 passed.
+- `npm run lint` — 0 problems.
+- `npm run typecheck` — clean (web + server projects).
+- `npm run test` — **828/828 passed across 23 files** (baseline; no unit
+  tests changed).
+- `npm run build` — success.
+- `npm run build:server` — clean `tsc` emit.
+- `npm run test:e2e` — **29/29 passed** (10 pre-existing XSS tests unchanged
+  + 19 new).
+- `npm run test:integration` — explicitly disabled; no GitHub contact.
+- `npm audit` — 0 vulnerabilities (the previously recorded transitive
+  `picomatch` advisory does not appear in this run; no dependency changes
+  in this task).
+- `openspec validate modernize-gitdatnote-foundation` — valid (2
+  pre-existing length warnings in `specs/github-connection/spec.md`,
+  unchanged).
+- `git diff --check` — clean.
+
+Nothing was staged, committed, or pushed. Pre-existing `.hermes/skills/`
+changes remain untouched.
+
+### Test-harness reliability corrections (final review, 2026-11-19)
+
+Two test-harness reliability corrections were made after architectural
+review. No production application code, dependencies, or existing
+Markdown XSS tests were changed; all 19 Playwright tests and every
+existing fixture and assertion were preserved; no sleeps, retry logic,
+fixed ports, or real GitHub contact were introduced.
+
+1. **Awaited Playwright route registration**
+   (`tests/e2e/connection-flow.spec.ts`): `routeJson()` and
+   `routeSession()` became async functions that `await page.route(...)`
+   before returning; every caller now awaits registration before the
+   navigation or request it intercepts. The four direct `page.route(...)`
+   registrations — OAuth start, repository-discovery failure, logout CSRF
+   failure, session-probe failure — were changed from fire-and-forget
+   `void` calls to awaited registrations. The state-driven failure
+   fixtures designed for React StrictMode are unchanged.
+2. **Resilient HTTP harness teardown**
+   (`tests/e2e/content-api.spec.ts`): `server`, `dir`, and `ctx` are now
+   optional, and `beforeAll` records the original setup failure in
+   `setupError` before rethrowing. `afterAll` attempts each cleanup step
+   independently so a failure in one step cannot prevent the remaining
+   cleanup: it disposes the Playwright request context when initialized,
+   closes the HTTP server when initialized (idle connections dropped via
+   `closeAllConnections()`, then `server.close()` awaited through its
+   callback so closure cannot hang), and removes the temporary SQLite
+   directory whenever it was created. The original setup failure is
+   rethrown unchanged where possible; a cleanup failure is surfaced only
+   when setup itself succeeded. Node HTTP server APIs only; no new
+   dependencies.
+
+### Final verification (2026-11-19, after corrections, Node 26)
+
+- `npm run lint` — 0 problems.
+- `npm run typecheck` — clean (web + server projects).
+- `npm run test` — **828/828 passed across 23 files**.
+- `npm run build` — success.
+- `npm run build:server` — clean `tsc` emit.
+- `npx playwright test tests/e2e/connection-flow.spec.ts` — 10/10 passed.
+- `npx playwright test tests/e2e/content-api.spec.ts` — 9/9 passed.
+- `npm run test:e2e` — **29/29 passed** (10 pre-existing XSS tests + 19 new).
+- `npm run test:integration` — disabled without explicit opt-in; no
+  GitHub contact.
+- `openspec validate modernize-gitdatnote-foundation` — valid (2
+  pre-existing length warnings in `specs/github-connection/spec.md`,
+  unchanged).
+- `git diff --check` — clean.
+
+Nothing was staged, committed, or pushed. Unrelated pre-existing
+`.hermes/skills/` changes remain preserved.
+
+### Phase 5 status
+
+Tasks 5.1 and 5.2 complete. Task 5.3 remains unchecked and unchanged.
