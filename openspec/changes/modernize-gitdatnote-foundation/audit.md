@@ -2115,3 +2115,310 @@ interface ApiErrorRecoveryProps {
 ### Phase 5
 
 Not started. All Phase 5 tasks remain unchecked.
+
+## Dedicated GitHub Integration-Test Repository and Test Harness — Task 5.1 (2026-11-17)
+
+### Scope and boundary
+
+Task 5.1 establishes the configuration and test infrastructure for future
+real-GitHub integration tests. **No live GitHub operations were performed**:
+no repository was created, modified, or deleted remotely; no integration
+credentials were used; no content writes occurred anywhere. Tasks 5.2 and
+5.3 remain unchecked and untouched.
+
+### Files created
+
+- `integration/config.js` (+ `integration/config.d.ts`) — the configuration
+  contract, a pure offline module shared by `setup.mjs`, `run.mjs`, and the
+  tests.
+- `integration/setup.mjs` — setup guide + validation CLI.
+- `integration/run.mjs` — the opt-in integration runner behind
+  `npm run test:integration`.
+- `integration/vitest.config.ts` — dedicated Vitest config whose only include
+  glob is `integration/**/*.test.ts` (never overlaps the root config's
+  `tests/**` sets; the root config is unchanged).
+- `integration/harness.test.ts` — 6 offline CLI-level tests of the runner.
+- `integration/README.md` — full developer documentation.
+- `tests/unit/integration-config.test.ts` — 13 offline unit tests of the
+  configuration contract (inside the normal unit suite; the only integration
+  code the unit suite touches).
+
+### Files modified
+
+- `package.json` — added `"test:integration": "node integration/run.mjs"`.
+  No dependency or lockfile changes.
+- `tsconfig.server.json` — added `integration/vitest.config.ts` to the
+  include set (the file is type-checked; the `.ts` test files themselves are
+  intentionally not part of `tsc`'s include — they run through Vitest/esbuild,
+  and their contract module is typed via `integration/config.d.ts`).
+- `.env.example` — appended a **commented-out** integration section
+  (documenting the three variables, token scope, and the "never commit real
+  values" rule). `.gitignore` already covers `.env`; no `.gitignore` change
+  was needed.
+
+### Configuration contract (`integration/config.js`)
+
+- `GITHUB_INTEGRATION` must be the literal string `true` — anything else
+  (unset, `TRUE`, `1`, empty, surrounding whitespace) is disabled.
+- `GITHUB_INTEGRATION_REPO` must be a strict `OWNER/REPO` identifier
+  (no URL schemes, no whitespace anywhere, no empty or oversized parts —
+  values are not trimmed; fail-closed).
+- Explicit rejection lists, evaluated in order: placeholder values
+  (`OWNER/REPO`, `your-repo/…`, `example/blog`, angle-bracket templates);
+  the GitDatNote application source repository (`kevinctofel/GitDatNote`,
+  case-insensitive); reserved live production repositories
+  (`SecondBrain`, case-insensitive); and a mandatory naming convention —
+  the repository must be `gitdatnote-integration-test` optionally followed
+  by one `-suffix` (case-insensitive).
+- `GITHUB_INTEGRATION_TOKEN` must be present, non-placeholder, and free of
+  whitespace. Its value is never echoed into any error, log line, or test
+  assertion (verified with a sentinel token).
+- No defaults are ever inferred from git remotes, the GitHub profile, or
+  production configuration.
+- A passing local check is explicitly documented as **not** proof that the
+  repository exists or that the token has write permission.
+
+### Setup script behavior (`integration/setup.mjs`)
+
+- `--help` (default with no args): documents repository creation, the three
+  environment variables, token scope (fine-grained PAT restricted to the
+  test repository with Contents read/write; repository-specific scope over
+  all-repositories scope; never production credentials), credential
+  handling, the opt-in command, task-5.3 isolation
+  (`__gitdatnote-integration-<UTC-ISO>/`) and cleanup design, and why
+  production repositories must never be used.
+- `--check`: offline, non-mutating, fail-closed; prints secret-free
+  per-variable guidance; exit 0 ready / exit 1 invalid; never writes to
+  GitHub.
+- `--check-access`: runs `--check` first; only if valid, makes ONE
+  read-only authenticated `GET /repos/OWNER/REPO` (token via header —
+  never in the URL), reports full name / privacy / default branch, and
+  distinguishes 404 (missing or not covered by the token) from 403
+  (insufficient scope). Still never writes.
+- Repository creation is manual and explicit (GitHub web UI); the script
+  never creates repositories via API.
+
+### Runner behavior (`npm run test:integration`)
+
+- **Disabled** (`GITHUB_INTEGRATION` ≠ `true`): prints
+  "Integration tests are DISABLED." plus explicit "No GitHub contact was
+  made / No credentials were loaded / No integration tests were executed /
+  This is not a pass for real-GitHub integration testing", and exits 0.
+  Vitest is never invoked.
+- **Enabled, invalid config**: prints "Integration tests are ENABLED but
+  the configuration is invalid (fail-closed)." with the secret-free error
+  list and exits 1 before any test runs or any GitHub contact.
+- **Enabled, valid config**: runs only the dedicated integration suite via
+  `integration/vitest.config.ts` (at this milestone: the 6-test offline
+  harness). The normal unit/web/characterization suites are never executed
+  as a side effect.
+
+### Tests added (all deterministic, offline, no credentials required)
+
+- `tests/unit/integration-config.test.ts` (13): missing opt-in; non-literal
+  opt-in values (`TRUE`, `1`, whitespace, empty); missing repo; missing
+  token; malformed `OWNER/REPO` (9 forms); placeholder owner/repo (5
+  forms, including angle-bracket templates); production source repository
+  rejected (3 casings); `SecondBrain` rejected case-insensitively (3
+  forms); valid dedicated configurations (3, including suffix and mixed
+  case); placeholder/malformed tokens rejected; token value (sentinel)
+  never appears in any error across 10 env permutations; structural proof
+  that the root Vitest config's include set is unchanged and does not
+  cover `integration/**`; disabled CLI path exits 0 with a fetch spy
+  proving zero network calls.
+- `integration/harness.test.ts` (6, runs only via the opt-in runner):
+  disabled CLI exit 0 + exact disabled message + no vitest invocation +
+  no fetch calls; fail-closed exit 1 for missing repo, for reserved
+  `SecondBrain`, and for missing token (asserting the sentinel token never
+  appears in output); enabled+valid config runs the offline harness suite
+  to completion.
+
+### Verification (all from clean `npm ci`, Node v26.7.0, 2026-11-17)
+
+- `npm run lint` — 0 problems.
+- `npm run typecheck` — clean (web + server projects).
+- `npm run test` — **815/815 passed across 23 files** (802 baseline + 13 new
+  unit tests; nothing removed or weakened).
+- `npm run build` — success.
+- `npm run build:server` — clean `tsc` emit.
+- `npm run test:e2e` — 10/10 passed.
+- `npm audit` — one pre-existing high advisory (`picomatch`, transitive via
+  Vitest; unchanged by this task, no new dependencies).
+- `openspec validate modernize-gitdatnote-foundation` — valid (2
+  pre-existing length warnings in `specs/github-connection/spec.md`,
+  unchanged by this task).
+- `git diff --check` — clean.
+
+Harness commands:
+
+- `node integration/setup.mjs --help` — exit 0, full guide.
+- `node integration/setup.mjs --check` (env unset) — exit 1, three
+  secret-free guidance lines, "No network requests were made".
+- `npm run test:integration` (env unset) — exit 0, "Integration tests are
+  DISABLED." with the four explicit no-contact lines.
+- Enabled + reserved repo (`GITHUB_INTEGRATION_REPO=kevinctofel/SecondBrain`)
+  — exit 1, fail-closed list names the reserved repository and the naming
+  convention; "No integration tests were executed and no GitHub contact
+  was made"; token value absent from output.
+- Enabled + valid dedicated config (fake token, no network) — exit 0,
+  offline harness suite: 1 file / 6 tests passed.
+
+### Final review corrections (2026-11-18)
+
+Three focused corrections from the independent final review. No production
+application code was changed, no dependencies were added, and Tasks 5.2
+and 5.3 remain untouched. Nothing was staged, committed, or pushed.
+
+- `integration/config.js` — token validation now rejects **any** whitespace
+  in `GITHUB_INTEGRATION_TOKEN` (leading/trailing spaces, tabs, newlines,
+  carriage returns) via a `/\s/` test on the raw value; the value is never
+  trimmed into an accepted credential. The error names the variable only
+  (secret-free) and the existing placeholder checks are preserved.
+- `integration/setup.mjs` — `--check-access` diagnostics are now fixed,
+  credential-safe text keyed on the known condition: HTTP 401
+  (authentication failed), 403 (access denied), 404 (repository not found /
+  not covered by the credential), rate limiting (429, or 403 with
+  `x-ratelimit-remaining: 0`), and a generic `HTTP <status>` message for
+  other statuses. Network exception text is replaced by a fixed diagnostic
+  (never forwarded), and remote response bodies are never forwarded.
+  Exactly one read-only request is still made (no retries, no extra
+  requests); the token appears only in the Authorization header and never
+  in output; the explicit statement that HTTP 200 reachability does NOT
+  prove Contents write permission is preserved; all failures exit 1.
+  `performAccessCheck` now takes injectable `fetchImpl`/`out`/`err` options
+  so the behavior is testable offline, and a new `integration/setup.d.mts`
+  carries the type declarations used by the unit tests (no new
+  dependencies).
+- `integration/README.md`, `integration/setup.mjs --help`, `.env.example` —
+  the environment examples now use explicit `export` statements and are
+  labeled illustrative placeholders, not real credentials. The README and
+  `--help` explain that sourcing a gitignored `.env` of ordinary
+  assignments does NOT export them automatically (Bash-compatible:
+  `set -a` / `source .env` / `set +a`), that sourcing executes shell
+  contents (so `.env` must be a trusted local file), and that real token
+  values must never be pasted into chat or logs.
+- `tests/unit/integration-config.test.ts` — 8 new deterministic, offline
+  tests: test 13 (any whitespace in the token fails closed: trailing and
+  leading space, tab, newline, CR, CRLF, mixed trailing whitespace, and
+  whitespace-only — never trimmed into a credential); test 14 (a valid,
+  whitespace-free token passes); and six `performAccessCheck` tests with a
+  mocked fetch — fixed per-status diagnostics while sentinel-bearing
+  remote bodies are never forwarded; 403 with zero remaining rate-limit
+  quota is diagnosed as rate limiting; network exception text is never
+  forwarded; invalid configuration fails before any request is made; on
+  success the sentinel appears only in the Authorization header and never
+  in output; and non-string response fields print safe `(unavailable)`
+  fallbacks. The sentinel never appears in any captured stdout/stderr.
+
+Verification (2026-11-18, same toolchain as above):
+
+- `npm run lint` — 0 problems.
+- `npm run typecheck` — clean (web + server projects).
+- `npm run test` — **823/823 passed across 23 files** (815 baseline + 8 new
+  offline unit tests; nothing removed or weakened).
+- `npm run build` — success.
+- `npm run build:server` — clean `tsc` emit.
+- `npm run test:e2e` — 10/10 passed.
+- `npm run test:integration` (disabled) — exit 0 with the explicit
+  disabled notice; no GitHub contact, no credentials loaded.
+- Enabled + trailing-space token — exit 1 fail-closed **before** any test
+  runs, secret-free "appears malformed" message; enabled + tab-in-token
+  `--check` — exit 1 with the same fixed message, "No network requests
+  were made".
+- No live GitHub request was made by any verification step; no integration
+  test ran against any repository.
+- `git diff --check` — clean.
+
+### Successful-response hardening (2026-11-18)
+
+Follow-up hardening of the `--check-access` success path after independent
+review confirmed the earlier corrections. The success path previously
+forwarded arbitrary string fields from a successful GitHub response and
+did not guard `response.json()`. No production application code,
+dependencies, or the integration runner were touched.
+
+- `integration/setup.mjs` — `performAccessCheck` success path:
+  - `response.json()` is now wrapped in a safe handler; a malformed JSON
+    body or a non-object HTTP 200 body returns exit 1 with the fixed
+    diagnostic "unexpected response format" — parsing errors and response
+    bodies are never forwarded.
+  - `full_name` is validated against the configured `OWNER/REPO`
+    (case-insensitive, since GitHub may normalize casing). A response that
+    does not identify the configured repository fails closed (exit 1)
+    rather than reporting success, and the foreign value is never printed.
+  - `default_branch` is printed only when it matches a conservative
+    single-line Git reference allowlist (`^[A-Za-z0-9._-]{1,100}$`);
+    anything else — including sentinel-bearing or control-character values
+    — prints the fixed `(unavailable)` fallback.
+  - `private` keeps its typed boolean handling (`true`/`false`, else
+    `(unavailable)`).
+  - Preserved: exactly one read-only request, no retries, the explicit
+    NOTE that reachability does NOT prove Contents write permission, and
+    nonzero exit on every failure.
+- `integration/README.md` — the `--check-access` description now documents
+  the identity check, the `(unavailable)` fallbacks, and the new fixed
+  failure conditions; the troubleshooting table gained two rows
+  ("does not identify the configured repository", "unexpected response
+  format"). `integration/setup.mjs --help` was updated in the same spirit.
+- `tests/unit/integration-config.test.ts` — one test rewritten ("success
+  with unexpected field types…" now expects fail-closed, since a response
+  that cannot confirm the configured repository must not succeed) and
+  five new deterministic offline tests added: malformed JSON in an HTTP 200
+  response (fixed diagnostic; sentinel and parsing error never forwarded);
+  a non-object HTTP 200 body never forwarded; a mismatched `full_name`
+  fails closed with the foreign value never printed; a case-insensitive
+  `full_name` match is accepted as the configured repository; and sentinel
+  credentials plus newlines/control characters in `private` /
+  `default_branch` are replaced by `(unavailable)` with the sentinel never
+  reaching stdout or stderr. All use injected fake fetches — no live
+  GitHub requests.
+
+Verification (2026-11-18): see the "Final review corrections" battery above
+re-run after this change — lint, typecheck, unit suite (baseline 823 + 5
+new = 828 expected), builds, Playwright 10/10, disabled integration run,
+`openspec validate`, and `git diff --check` all reported in the session
+record for this hardening round.
+
+### Local browser verification
+
+- `npm run dev:server` + `npm run dev` started; `GET /api/health` → 200;
+  `http://localhost:5173` served the app (title "🐴 GitDatNote").
+- Disconnected state loads ("Not connected to GitHub" + Connect GitHub
+  button); sample connected-layout preview works with the explicit "sample
+  data only / not a live GitHub connection" banner; repository selection
+  renders the sample fixture (access/visibility metadata + safe-Markdown
+  preview); zero console errors across load + preview + selection; no real
+  GitHub content operations triggered.
+- Unauthenticated boundary: `curl -i http://127.0.0.1:3000/api/repos/example/blog/content?path=test.md`
+  → **HTTP 401** `{"error":{"code":"UNAUTHORIZED",...}}` as expected.
+- Both dev servers stopped cleanly; ports 3000 and 5173 confirmed free.
+
+### CI compatibility
+
+`.github/workflows/ci.yml` is **unchanged**. CI continues to run on the
+Node 24 / Node 26 matrix without any GitHub integration credentials, never
+enables real integration tests, and gains no tokens in workflow YAML. A
+future explicitly authorized live-integration workflow is a separate,
+later decision.
+
+### Known limitations and task-5.3 dependencies
+
+- A passing local check does not prove the repository exists or that the
+  token has Contents **write** permission — only the task-5.3 live suite
+  can establish that.
+- Naming-convention rejection is a safeguard, not proof of safety; the
+  operator must confirm the repository is dedicated and disposable.
+- The integration suite at this milestone is offline harness coverage only;
+  a green `npm run test:integration` is **not** real-GitHub integration
+  coverage until task 5.3 implements create/read/update/conflict/list.
+- Task 5.3 will rely on the timestamped-directory isolation
+  (`__gitdatnote-integration-<UTC-ISO>/`) and the direct-Contents-API
+  cleanup contract documented here; the configuration contract is designed
+  so that restriction can be enforced later without changing the
+  opt-in/fail-closed surface.
+- No delete endpoints were added to production; the production content
+  adapter and authentication are untouched.
+
+### Phase 5 status
+
+Task 5.1 complete. Tasks 5.2 and 5.3 remain unchecked and not started.

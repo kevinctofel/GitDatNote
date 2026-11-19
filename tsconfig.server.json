@@ -11,6 +11,7 @@
     "src/server",
     "src/shared",
     "tests/unit",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "integration/vitest.config.ts"
   ]
 }
