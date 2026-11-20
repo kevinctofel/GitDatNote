@@ -15,10 +15,13 @@
  *   integration/vitest.config.ts (the normal unit/web/e2e suites are never
  *   executed as a side effect).
  *
- * At this milestone the integration suite is non-mutating and offline:
- * it verifies the harness configuration and the runner's disabled/
- * fail-closed behavior. Real-GitHub create/read/update/conflict/list
- * coverage arrives in task 5.3 and must not be claimed before then.
+ * The suite under that configuration contains two parts:
+ * - the task 5.1 harness (offline, fail-closed runner safety);
+ * - the task 5.3 real-GitHub content lifecycle (create / read back /
+ *   update with correct SHA / stale-SHA conflict / directory listing)
+ *   run against the operator-configured dedicated test repository, with
+ *   guaranteed cleanup through the GitHub Contents API using the
+ *   dedicated integration token (never the production GitDatNote API).
  */
 
 import { execFile } from 'node:child_process';
@@ -69,7 +72,8 @@ function runIntegrationSuite() {
   }
   console.log(
     `Configuration valid; running the dedicated integration suite for ` +
-      `${process.env[REPO_VAR].trim()} (offline harness at this milestone).`
+      `${process.env[REPO_VAR].trim()} (task 5.1 harness + task 5.3 real-GitHub ` +
+      `content lifecycle with guaranteed Contents-API cleanup).`
   );
   const args = [
     vitestEntry,

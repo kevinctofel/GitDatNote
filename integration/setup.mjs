@@ -15,7 +15,9 @@
  * is NOT proof that the repository exists or that the token has the right
  * permissions; only --check-access (opt-in, online) can confirm the repo is
  * reachable, and even that does not prove write permissions without a
- * write attempt (deferred to task 5.3).
+ * write attempt. The task 5.3 live suite performs that write attempt in a
+ * read-only preflight plus an isolated create/read/update/conflict/list
+ * lifecycle with guaranteed cleanup.
  */
 
 import { pathToFileURL } from 'node:url';
@@ -88,7 +90,7 @@ created. Never paste real token values into chat, logs, or tickets.
 Token scope (minimum necessary):
   - Preferred: a FINE-GRAINED personal access token with access limited to
     the test repository ONLY, and Contents: Read and Write permission
-    (the eventual task 5.3 suite creates/updates/deletes test content).
+    (the live task 5.3 suite creates/updates/deletes test content).
   - A suitably scoped GitHub App installation token is also acceptable.
   - Never use the GitDatNote production GitHub App credentials, and never
     request access to all repositories when repository-specific access is
@@ -286,8 +288,9 @@ export async function performAccessCheck({
   out.write(`  default_branch  = ${defaultBranch}\n`);
   out.write(
     'NOTE: reachability does NOT prove Contents write permission. The task 5.3 ' +
-      'suite will exercise create/update/delete against the isolated ' +
-      'timestamped directory once it is implemented.\n'
+      'live suite (npm run test:integration) exercises create/update/delete ' +
+      'against the isolated timestamped directory, after its own read-only ' +
+      'preflight and with guaranteed Contents-API cleanup.\n'
   );
   return 0;
 }

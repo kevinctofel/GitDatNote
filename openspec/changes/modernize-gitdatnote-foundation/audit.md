@@ -2635,4 +2635,256 @@ Nothing was staged, committed, or pushed. Unrelated pre-existing
 
 ### Phase 5 status
 
-Tasks 5.1 and 5.2 complete. Task 5.3 remains unchecked and unchanged.
+Tasks 5.1, 5.2, and 5.3 complete (see Task 5.3 section below).
+
+## Real GitHub Content Lifecycle Integration Tests — Task 5.3 (2026-11-19; live run complete)
+
+**Status: COMPLETE.** The first authorized live run (2026-11-19) against `kevinctofel/gitdatnote-integration-test` failed during the cleanup stage (base64 line-wrap decoder defect — see the "Live Cleanup Decoder Correction" section at the end of this file); the leftover run-owned file was manually removed by the operator, the decoder was corrected, and the operator then explicitly authorized exactly one new live run, which **passed with confirmed automated cleanup** (see "Live test results" below). Task 5.3 is now `[x]` in `tasks.md`. Before the live work, the suite was exercised against a placeholder token to verify fail-closed preflight behavior (no writes, no credential leakage).
+
+### Files introduced
+
+- `integration/safety.ts` — pure, offline safety helpers: unique run-directory generation (UTC ISO with filename-safe separators + short random suffix), validated path construction strictly inside the content root, and cleanup-target validation (exact owned-file match under the exact run directory; no prefix-based deletion, no traversal/absolute paths, no external prefixes).
+- `integration/cleanup.ts` — guaranteed cleanup that calls the GitHub Contents API **directly** with `GITHUB_INTEGRATION_TOKEN` (never the production GitDatNote API, which has no delete endpoint). Deletes only the exact files this run created, using each file's current blob SHA fetched from GitHub immediately before deletion; unexpected files in the run directory are reported and fail the run rather than deleted; failure is propagated as a test failure, never swallowed.
+- `integration/github-content.test.ts` — the live lifecycle suite (one coherent ordered test): preflight → create → read-back → update-with-correct-SHA → stale-SHA 409 conflict → directory listing, with cleanup in a `finally` block.
+- `integration/safety.test.ts` — offline regression tests for the safety/cleanup helpers (no credentials, no network). Rewritten to 33 tests in the review-corrections round (below).
+
+### Files modified
+
+- `integration/README.md` — dedicated-repo requirements, token minimum permissions, explicit opt-in, preflight, operator checklist, unique run-directory format, created files, cleanup semantics and failure handling, why cleanup never uses production APIs, disabled-run recognition, post-run verification, CI behavior, troubleshooting.
+- `integration/vitest.config.ts` — suite-content comment updated (harness = task 5.1 offline; `github-content.test.ts` = task 5.3 live); generous timeouts for real GitHub latency (`testTimeout` 120 s, `hookTimeout` 30 s).
+- `integration/run.mjs`, `integration/setup.mjs`, `integration/config.js`/`config.d.ts` — comments only; the fail-closed configuration contract (`GITHUB_INTEGRATION=true`, dedicated `gitdatnote-integration-test[-suffix]` naming, SecondBrain/source-repo rejection, no repository inference) is unchanged and reused as required.
+- `integration/harness.test.ts` — header comment updated (suite is no longer "entirely offline"); the process-level fetch guard's zero-network assertion is now scoped by a block-start marker so it does not depend on the live suite running in the same process; disabled/invalid-configuration CLI checks unchanged.
+- `openspec/changes/modernize-gitdatnote-foundation/tasks.md` — task 5.3 status note (implementation complete, live run pending).
+
+### Live suite design (what the real test verifies)
+
+- **Real, not mocked:** instantiates the production content adapter from `src/server/content/index.ts` with a real authenticated Octokit (installed `octokit@3.2.2`) Contents client built from `GITHUB_INTEGRATION_TOKEN`. No in-memory mock, no fake API responses. Octokit v3 API surface (`octokit.rest.repos.*`) verified by probe before use.
+- **Preflight (read-only, fail-closed before any write):** (1) the client's resolved request URL origin is exactly `https://api.github.com` (exact-origin check; prefix checks would accept lookalike hosts); (2) `GET /repos/{owner}/{repo}` returns repository metadata; (3) returned identity matches the configured `OWNER/REPO` case-insensitively; (4) the target name follows the dedicated integration-test convention; (5) the repository is not GitDatNote's source repo, SecondBrain, or another reserved target. Any failure stops the run before writes; errors are sanitized (fixed strings + status code only — no raw response bodies, no Authorization headers, no token values).
+- **Isolation:** each run creates `__gitdatnote-integration-<UTC-ISO filename-safe>-<random suffix>/` inside the validated content root (`src/posts`, from `DEFAULT_CONTENT_ROOT`) — unique per run, never an existing directory, never the root itself, never absolute/traversal. A single deterministic Markdown file `integration-article.md` is written inside it (heading, paragraphs, UTF-8 sample, run-specific marker).
+- **Lifecycle assertions:** create returns the expected path + valid blob SHA; read-back returns type `file`, exact path, byte-exact UTF-8 content, matching SHA, size = UTF-8 byte length; update with the current SHA returns a new, different SHA and reads back exactly; a second update with the stale original SHA is reported as `SHA_CONFLICT` (the adapter's mapped 409 contract) and a subsequent read proves the updated content and SHA are unchanged (no overwrite); directory listing of the run directory shows exactly the expected file with expected name/type/SHA/size.
+- **Cleanup:** `finally`-driven; deletes exactly the files this run created via direct Contents-API deletes with freshly fetched blob SHAs; empty directory disappears from the tree; any cleanup failure is a sanitized reported failure that fails the run (never a pass) and prints the validated repository + directory for manual inspection.
+
+### Real GitHub operations executed in this session
+
+- One **read-only** `GET /repos/kcttest123/gitdatnote-integration-test` made by the preflight during a fail-closed verification run with a **placeholder** token (`ghp_` + zeros, not a real credential): GitHub returned **404**; the suite failed closed before any write with the sanitized message `preflight failed: could not retrieve repository metadata (resource not found (404))`.
+- **No live mutations were performed.** No repositories were created. No writes to any repository (dedicated, production, or otherwise) occurred. No real credentials were used, generated, or stored.
+
+### Dedicated test repository
+
+- **Not configured.** No repository identifier is recorded because none was provided; the operator must manually create the dedicated repository (naming convention `gitdatnote-integration-test[-suffix]`), confirm it contains no production/personal data, and scope a Contents read/write token to it before the live run.
+
+### Offline verification record (this session)
+
+- `npm run lint` — clean (0 errors).
+- `npm run typecheck` — clean (0 errors).
+- `npm run test` — **828/828 passed** (pre-task baseline unchanged; integration tests not discovered by the default config).
+- `npm run build` — exit 0; `npm run build:server` — exit 0.
+- `npm run test:e2e` — **29/29 passed** (pre-task baseline unchanged).
+- `npm run test:integration` (disabled, no env vars) — exit 0, explicit message that **no tests were executed**, no GitHub contact, no credentials loaded; correctly not a pass claim.
+- `npm run test:integration` (enabled, valid config shape, **placeholder** token) — `harness.test.ts` + `safety.test.ts` pass (**36 offline safety tests** + harness suite, zero-network assertion holding); `github-content.test.ts` fails closed at preflight (404, sanitized) as designed — proof the live suite cannot pass without a real dedicated repository and token.
+- `npm audit` — **0 vulnerabilities** (no advisory; no dependency changes made).
+- `openspec validate modernize-gitdatnote-foundation` — valid (2 pre-existing non-blocking warnings about long requirement text in `github-connection/spec.md`, unrelated to this task).
+- `git diff --check` — clean.
+- `git status --short` / `git diff --stat` — see final report; nothing staged, committed, or pushed; pre-existing `.hermes/skills/` changes preserved untouched.
+
+### Blocking Source Review Corrections (2026-11-19)
+
+An independent review of the initial implementation (`gitdatnote-task53-review.patch`) found three blocking issues. All three were corrected in this session. **No live GitHub writes were performed; nothing was staged, committed, or pushed; Phase 6 was not begun.** Pre-existing `.hermes/skills/` changes preserved untouched.
+
+#### Correction 1 — Live configuration resolution
+
+The live test had called `validateIntegrationConfig()` and misused its `{ ok, errors }` result as if it carried owner/repo/token. Corrected in `integration/github-content.test.ts` and `integration/safety.ts`:
+
+- New `resolveLiveIntegrationConfig(env)` in `integration/safety.ts` implements the accepted configuration contract: opt-in flag must be exactly `"true"`, then `validateIntegrationConfig(env)`, then `parseRepositoryId` on `GITHUB_INTEGRATION_REPO` only. On failure it returns `{ ok: false, errors: string[] }` with fixed, sanitized strings.
+- On success it returns only `{ ok: true, owner, repo }` — **the token is never resolved, returned, or logged by this function**. The live test reads `GITHUB_INTEGRATION_TOKEN` itself only after successful validation.
+- No inference of repository or credential from git remotes, profiles, or production configuration (regression-tested: unset/ambiguous opt-in and missing values fail before any network access).
+
+#### Correction 2 — Nonexistent helper import and exact repository preflight
+
+- The live test imported `isReservedRepositoryName`, which `integration/safety.ts` did not export. Removed; the preflight now reuses the existing repository naming and reserved-name rules from `integration/config.js` (`DEDICATED_REPO_PATTERN`, `RESERVED_REPOSITORY_NAMES`, `PRODUCTION_SOURCE_REPOSITORY`) via `validateIntegrationConfig`.
+- The preflight enforces the **exact dedicated naming convention** `gitdatnote-integration-test[-suffix]` (case-insensitive) — not a broad `startsWith("gitdatnote-integration")` check (a bare `gitdatnote-integration` name is now rejected).
+- New `repositoryIdentityMatches()` in `integration/safety.ts`: the `full_name` actually reported by GitHub must equal the configured `OWNER/REPO` (case-insensitive) before any mutation.
+- The SecondBrain and GitDatNote source-repository exclusions are unchanged and still enforced.
+
+#### Correction 3 — Ownership tracking and partial-write cleanup
+
+The live test previously registered the created file only after successful adapter return and assertions. Corrected in `integration/github-content.test.ts` and `integration/cleanup.ts`:
+
+- **Recorded before the write:** the exact intended artifact path and the run-specific content marker are recorded before creation is attempted; a rejected create call is never treated as proof the file does not exist.
+- **Finalization is read-only and always runs** (in `finally`) after any attempted create: list the run directory; a 404 (empty directories do not exist in git) triggers a direct read-only probe of the exact artifact path — only a direct 404 confirms absence (`confirmedAbsent`). If the artifact cannot be confirmed absent, cleanup fails. This closes the 404-concealment gap: a 404 on a recorded or possibly-created artifact can no longer hide an unverified deletion.
+- **Ownership before deletion:** each listed file is re-validated against the exact run scope and file-name allowlist (`validateRunCleanupPath`), and ownership is established only from its exact validated path **and** the run-specific marker embedded in its content (`verifyArtifactOwnership`). Unreadable files, files with no marker, or files with a different marker are **never deleted** — cleanup fails and prints sanitized manual-inspection guidance (validated repository URL; no credentials).
+- **Deletion mechanics preserved:** direct GitHub Contents API with a freshly fetched blob SHA (not the listing SHA); no recursive deletion; no retries; deletion failures are reported and fail the run.
+- **Success requires confirmation:** a final read-only check must see the run directory 404; remaining entries are reported as unexpected and not deleted. Cleanup success is never reported without this confirmation.
+- Diagnostics carry fixed status-based strings only — no raw upstream bodies, no credential values (regression-tested).
+
+#### New offline regression tests (`integration/safety.test.ts`, rewritten — 33 tests)
+
+Deterministic, fake GitHub clients only — no network, no credentials. Covers the required scenarios:
+
+1. Valid configuration resolution returns the correct owner/repo without exposing the token.
+2. Invalid configuration fails before network access (opt-in gate, fail-closed, no inference).
+3. Production and reserved repositories remain blocked (plus exact-naming rejection).
+4. An accepted remote write followed by a simulated lost response triggers read-only ownership verification and safe no-delete confirmation.
+5. A malformed create response after a simulated successful write triggers ownership verification and deletion (marker-bearing content).
+6. An existing file with a different run marker is never deleted.
+7. An unidentifiable/unreadable file is never deleted.
+8. Cleanup verification failures (failed delete, surviving unexpected file) produce failing results.
+9. No credential appears in diagnostics.
+
+Plus regression coverage for run-directory generation/validation, artifact path construction, cleanup path allowlists, repository identity matching, and error sanitization.
+
+#### New integration typecheck gate (`tsconfig.integration.json` + `package.json`)
+
+The regular TypeScript configuration did not compile the new integration files. Added:
+
+- `tsconfig.integration.json` — strict, `noEmit`, `module: nodenext` / `moduleResolution: nodenext`, `strict`, `noUncheckedIndexedAccess`, `noImplicitReturns`, `noFallthroughCasesInSwitch`; includes only `integration/**/*.ts` and consumes the existing `integration/config.d.ts` declarations for the JavaScript configuration module.
+- New script `npm run typecheck:integration`, and the existing `npm run typecheck` script now includes the integration config, so the gate runs in the normal verification workflow (offline, no credentials).
+- The gate surfaced one real defect during correction: an unused `ErrorDetail` type import in `integration/github-content.test.ts` (removed). No broad `any` casts were introduced.
+
+#### Verification results (2026-11-19, all local, no live GitHub writes)
+
+| Command | Result |
+|---|---|
+| `npm run lint` | clean (0 errors) |
+| `npm run typecheck` | clean (0 errors; now includes `tsconfig.integration.json`) |
+| `npm run typecheck:integration` | clean (0 errors across `github-content.test.ts`, `safety.ts`, `cleanup.ts`, `safety.test.ts`) |
+| Offline safety suite (`vitest --config integration/vitest.config.ts integration/safety.test.ts`) | **33/33 passed** |
+| `npm run test` | **828/828 passed** (baseline unchanged) |
+| `npm run build` / `npm run build:server` | exit 0 / exit 0 |
+| `npm run test:e2e` | **29/29 passed** (baseline unchanged) |
+| `npm run test:integration` (disabled, no env) | fails closed as designed: explicit "not a pass" notice, no GitHub contact; runner remains disabled for ordinary verification |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing non-blocking warnings in `github-connection/spec.md`, unrelated) |
+| `git diff --check` | clean |
+
+#### Files changed in the corrections round
+
+| File | Status |
+|---|---|
+| `integration/safety.ts` | new (241 lines) — config resolution, run-directory/path helpers, identity match, sanitization |
+| `integration/cleanup.ts` | new (354 lines) — ownership-verified, finally-driven, 404-confirming cleanup |
+| `integration/github-content.test.ts` | new (417 lines) — live lifecycle suite with pre-creation recording and exact preflight |
+| `integration/safety.test.ts` | new (728 lines) — 33 offline regression tests (fake clients) |
+| `tsconfig.integration.json` | new (15 lines) — integration typecheck gate |
+| `package.json` | `typecheck:integration` script; `typecheck` includes integration config |
+
+#### Status after corrections
+
+Task 5.3 remains `[ ]` in `tasks.md`. It will be checked only after an authorized live lifecycle run against the dedicated test repository with a restricted token succeeds and cleanup is confirmed. Stopping here for independent review before live execution.
+
+#### Final Pre-Live Safety Corrections (2026-11-19)
+
+An independent review of `gitdatnote-task53-final-review.patch` found two blocking issues. Both were corrected in this session without redesigning the integration suite. **No live GitHub writes were performed; nothing was staged, committed, or pushed; Phase 6 was not begun.** Pre-existing `.hermes/skills/` changes preserved untouched. Task 5.3 remains `[ ]` in `tasks.md`.
+
+**Correction 1 — Exact owner/repository pair for the production-source exclusion (`integration/github-content.test.ts`, `integration/safety.ts`)**
+
+The preflight rejected any repository owned by `kevinctofel`, which incorrectly blocked the intended target `kevinctofel/gitdatnote-integration-test`. The exclusion now compares the **exact owner/repository pair** (case-insensitive) against the accepted `PRODUCTION_SOURCE_REPOSITORY` constant, via the new minimal pure helper `checkPreflightPolicy()` in `integration/safety.ts` (extracted from the preflight so it is deterministically testable offline):
+
+- `kevinctofel/GitDatNote` (and any case variant) → rejected as the application source repository.
+- `kevinctofel/gitdatnote-integration-test` → allowed through the repository-name policy (no longer blocked by owner).
+- `SecondBrain` (any owner) → still rejected by the reserved-name policy.
+- A different owner with a repository called `GitDatNote` → never classified as the application source repository; still rejected by policy (the bare `gitdatnote` name is also an obvious placeholder value and is rejected by the earlier placeholder policy).
+- Exact `DEDICATED_REPO_PATTERN` enforcement and the reported-identity check (`repositoryIdentityMatches`) are unchanged: GitHub-reported identity must still match the configured target before any mutation, and the repository metadata request remains read-only.
+
+**Correction 2 — Deletion SHA bound to the ownership-verified response (`integration/cleanup.ts`)**
+
+The cleanup previously read a file to confirm the run marker, then made a **second, unverified** read for the deletion SHA (check-then-delete gap). `verifyArtifactOwnership` now validates, in a single Contents API response: the exact repository path, the expected file type, strict base64 → UTF-8 decoding (byte-exact roundtrip), the exact run-specific marker, and a well-formed 40-hex blob SHA — and **returns that verified SHA**. `deleteFile` receives only that SHA; the separate unverified SHA fetch is gone. If the file is replaced after verification, GitHub's SHA-conditional delete fails (409), the failure is sanitized and reported, there is **no automatic retry** with the newer SHA, and the replacement file remains intact. `finally`-driven cleanup and failed-cleanup reporting behavior are preserved. No recursive deletion or general-purpose repository cleanup utility was introduced; only the direct GitHub Contents API is used.
+
+**New regression tests (`integration/safety.test.ts` — now 46 tests)**
+
+- `kevinctofel/gitdatnote-integration-test` passes the preflight identity/policy check (not blocked by owner); reported-identity mismatch is still rejected even for the dedicated name.
+- `kevinctofel/GitDatNote` (and case variants) is rejected as the application source; `SecondBrain` remains rejected; reserved and malformed targets remain rejected; a different owner's `GitDatNote` is never classified as the application source.
+- Cleanup uses the SHA from the exact response that passed marker verification — exactly three reads (listing + ownership verification + final check), one delete, no second SHA fetch.
+- A simulated replacement after marker verification (the fake client models GitHub's conditional SHA behavior — delete succeeds only when the supplied SHA matches the current blob SHA): the SHA-protected delete fails, exactly one deletion attempt uses the originally verified SHA (never the replacement's), diagnostics carry no raw upstream message or replacement SHA, and the replacement file remains intact.
+- Invalid base64, invalid UTF-8, and malformed blob SHAs all prevent deletion (ownership cannot be established; zero delete calls).
+- No credentials or raw upstream error messages enter diagnostics.
+
+All fake clients — no network, no credentials.
+
+**Verification results (2026-11-19, all local, no live GitHub writes)**
+
+| Command | Result |
+|---|---|
+| `npm run lint` | clean (0 errors) |
+| `npm run typecheck` | clean (0 errors; includes `tsconfig.integration.json`) |
+| `npm run typecheck:integration` | clean (0 errors) |
+| `npm run test` | **828/828 passed** (baseline unchanged) |
+| `npm run build` / `npm run build:server` | exit 0 / exit 0 |
+| `npm run test:e2e` | **29/29 passed** (baseline unchanged) |
+| `npm run test:integration` (disabled, no env) | exit 0 with explicit disabled notice — "no integration tests were executed… not a pass"; no GitHub contact |
+| Offline safety suite (`npm run test:integration:offline`, cannot discover `github-content.test.ts`) | **46/46 passed** (33 baseline + 13 new) |
+| `npm audit` | 0 vulnerabilities |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing non-blocking warnings in `github-connection/spec.md`, unrelated) |
+| `git diff --check` | clean |
+
+**Files changed in this corrections round:** `integration/safety.ts` (+`checkPreflightPolicy`), `integration/cleanup.ts` (verified-SHA ownership verification), `integration/safety.test.ts` (+13 regression tests), `package.json` (+`test:integration:offline` script).
+
+**Confirmed: no real GitHub writes occurred** — no credentials were configured or used; no network calls were made by the verification runs (offline suites only; the live suite was never invoked).
+
+### Live test results
+
+**Initial authorized live run (2026-11-19) — failed during cleanup.** The operator configured the dedicated repository `kevinctofel/gitdatnote-integration-test` (both `node integration/setup.mjs --check` and `node integration/setup.mjs --check-access` passed), authorized exactly one controlled live run, and that run was executed. Preflight passed (exact-origin, identity, and policy checks). The run created an isolated `src/posts/__gitdatnote-integration-<UTC-ISO>-<suffix>/` directory containing the single file `integration-article.md`. The test failed during the cleanup stage: `verifyArtifactOwnership` rejected GitHub's base64 response — the Contents API wraps base64 at 64 columns with CR/LF line breaks, and the then-current decoder treated the line breaks as invalid base64 — so ownership could not be established and the file was not deleted. The suite failed closed as designed: no broader deletion was attempted, and the failure was reported with the sanitized repository + run directory.
+
+**Leftover file's run-specific identity.** The remaining file was independently inspected via GitHub's public read-only API. Its path is `src/posts/<run-directory>/integration-article.md` (run directory generated by that run), and its content carries (a) the correct run-specific marker `gitdatnote-run-<run-directory>` and (b) the updated Markdown content (the lifecycle had reached the update step before cleanup). Manual removal by the operator was subsequently performed and confirmed (see the second live run below).
+
+No passing live-run report was manufactured with mocks.
+
+**Second authorized live run (2026-11-19) — passed, with confirmed automated cleanup.** After the operator manually removed the leftover artifact from the first run and the decoder correction plus offline regression tests were verified, the operator explicitly authorized exactly one new live run. Verified results:
+
+- `node integration/setup.mjs --check` — passed.
+- `node integration/setup.mjs --check-access` — passed.
+- `npm run test:integration` — **61/61 tests passed across 3 files** (the opt-in live integration suite).
+- Real GitHub content lifecycle — passed: file created in the isolated run directory, read back with exact content match, updated with the correct SHA, update with a wrong SHA rejected with 409, and directory listing verified.
+- Direct Contents API cleanup — passed: the run-owned file was deleted using the ownership-verified SHA and the isolated run directory was confirmed gone.
+- Independent GitHub recursive-tree inspection (read-only) — only `README.md` remains on `main`; `truncated: false`; no run-directory or leftover artifacts remain.
+
+Task 5.3 is now `[x]` in `tasks.md`. No further live integration runs have been initiated.
+
+### Limitations
+
+- The 409 conflict mapping was verified offline through the adapter's error contract and mocked coverage, and was subsequently confirmed live: the successful authorized run's update with a wrong SHA was rejected with 409 by real GitHub.
+- Preflight proves repository identity and API reachability but not Contents **write** permission and not disposability — both require the operator checklist and a successful live run.
+- GitHub returns 404 (not 401) for nonexistent/unauthorized repositories with token auth; the sanitized error reports the actual status without disclosing repository existence semantics.
+
+### Live Cleanup Decoder Correction (2026-11-19)
+
+**Observed failure.** The initial authorized live run (recorded above) failed during cleanup. Root cause: GitHub's Contents API delivers the `content` field as base64 **wrapped at 64 columns with CR/LF line breaks**. The then-current decoder in `integration/cleanup.ts` applied the strict-alphabet pattern and the length-multiple-of-4 check to the *wrapped* string, so the line breaks made the content "not valid base64". Ownership verification therefore failed before the marker check, cleanup could not establish ownership, and — per the fail-closed design — the run-owned file was left in place and the run was failed with the sanitized repository + run directory reported for manual inspection.
+
+**Leftover artifact identity.** Independently inspected via GitHub's public read-only API: `src/posts/<run-directory>/integration-article.md` carries the correct run-specific marker `gitdatnote-run-<run-directory>` and the updated Markdown content of that run (no other run artifacts exist; the repository's root README was never touched). Manual removal by the operator is **not yet confirmed** at the time of writing.
+
+**Correction (`integration/cleanup.ts`).** `verifyArtifactOwnership` now:
+- removes **only** CR and LF characters from the received `content` before validation (every other character remains invalid — no permissive decoding);
+- strictly validates the compact base64: standard alphabet, length a multiple of 4, padding only at the very end (0–2 characters);
+- decodes, and requires that **re-encoding the decoded bytes exactly reproduces the compact base64** (canonical form — dropped trailing bits and noncanonical padding are rejected);
+- performs strict UTF-8 round-trip validation on the decoded bytes;
+- requires the exact run-specific ownership marker;
+- validates the exact repository path, the expected file type, and a well-formed 40-hex blob SHA.
+The SHA from that same ownership-verified response is the only SHA passed to `deleteFile` (no separate unverified fetch). The marker check, cleanup paths, deletion allowlist, `finally` cleanup, and failed-cleanup reporting behavior are unchanged. No recursive deletion or general-purpose repository cleanup utility was introduced.
+
+**Offline regression tests (`integration/safety.test.ts`).** Eight new deterministic fake-client tests (no network, no credentials), including a reproduction of the observed failure using a 219-byte Markdown payload with 64-column-wrapped base64:
+- LF-wrapped 219-byte payload with the correct marker → ownership verified, file deleted, directory gone; the verified SHA is passed unchanged to the deletion.
+- CRLF-wrapped equivalent → same outcome.
+- Malformed base64 character inside wrapped content → rejected, no deletion.
+- Noncanonical base64 (`QR==` — non-zero trailing bits in the final group that a permissive decoder silently drops; the decode → re-encode round-trip check rejects it) → rejected, no deletion.
+- Invalid padding (`====`) → rejected, no deletion.
+- Invalid UTF-8 bytes (wrapped) → rejected, no deletion.
+- Wrapped content with a wrong marker → rejected, no deletion.
+- Concurrent replacement after wrapped-base64 verification → exactly one deletion attempt with the originally verified SHA, the SHA-protected delete fails (409), no retry with the newer SHA, replacement file intact.
+
+**Verification (2026-11-19, all local, no live GitHub writes):**
+
+| Command | Result |
+|---|---|
+| `npm run lint` | clean (0 errors) |
+| `npm run typecheck` | clean (0 errors; includes `tsconfig.integration.json`) |
+| `npm run typecheck:integration` | clean (0 errors) |
+| `npm run test` | **828/828 passed** (baseline unchanged) |
+| `npm run test:e2e` | **29/29 passed** (baseline unchanged) |
+| `npm run test:integration:offline` | **54/54 passed** (46 prior + 8 new decoder regression tests) |
+| `npm run test:integration` (disabled, no env) | exit 0 with explicit disabled notice — "no integration tests were executed… not a pass"; no credentials loaded, no GitHub contact |
+| `openspec validate modernize-gitdatnote-foundation` | valid (2 pre-existing non-blocking warnings in `github-connection/spec.md`, unrelated) |
+| `git diff --check` | clean |
+
+**Manual cleanup outcome.** The operator manually removed the leftover `integration-article.md` from the first run and confirmed the removal. The operator then explicitly authorized exactly one new live run, which passed with automated cleanup and an independently confirmed clean repository state (see "Live test results" above).
+
+**Status.** Task 5.3 is now `[x]` in `tasks.md`: the authorized live run succeeded and cleanup was both automated and independently confirmed. No further live runs have been initiated.

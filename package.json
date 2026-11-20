@@ -13,10 +13,12 @@
     "build:server": "tsc -p tsconfig.server-build.json",
     "start": "node dist-server/server/index.js",
     "lint": "eslint . --ext js,jsx,ts,tsx --report-unused-disable-directives --max-warnings 0",
-    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.server.json",
+    "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.integration.json",
+    "typecheck:integration": "tsc --noEmit -p tsconfig.integration.json",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:integration": "node integration/run.mjs",
+    "test:integration:offline": "vitest run --config integration/vitest.config.ts integration/safety.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

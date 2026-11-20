@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 /**
  * Dedicated Vitest configuration for the opt-in GitHub integration suite
- * (OpenSpec task 5.1).
+ * (OpenSpec tasks 5.1 and 5.3).
  *
  * Isolation guarantees:
  * - The default `vitest.config.ts` include set (characterization / unit /
@@ -12,18 +12,20 @@ import { defineConfig } from "vitest/config";
  *   configuration, and it does so only after GITHUB_INTEGRATION=true and a
  *   valid, fail-closed configuration check.
  *
- * At this milestone the suite under this config is non-mutating and
- * offline (harness configuration + runner safety). Real-GitHub coverage
- * (task 5.3) will add live tests here against the dedicated test
- * repository; until then, a green run under this config is NOT evidence of
- * real-GitHub content integration coverage.
+ * Suite contents:
+ * - `harness.test.ts` — offline harness/configuration safety (task 5.1);
+ * - `github-content.test.ts` — real-GitHub content lifecycle through the
+ *   production content adapter, with guaranteed Contents-API cleanup
+ *   (task 5.3). The live suite only runs against the operator-configured
+ *   dedicated test repository and makes real network calls by design.
+ *
+ * Timeouts are generous for real GitHub latency.
  */
 export default defineConfig({
   test: {
     include: ["integration/**/*.test.ts"],
     environment: "node",
-    // Live GitHub tests (task 5.3) will need generous timeouts.
-    testTimeout: 30_000,
+    testTimeout: 120_000,
     hookTimeout: 30_000,
   },
 });

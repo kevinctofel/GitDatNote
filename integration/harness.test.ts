@@ -5,15 +5,18 @@
  * when `npm run test:integration` passes its fail-closed configuration
  * check (GITHUB_INTEGRATION=true + valid dedicated-repo configuration).
  *
- * SCOPE AT THIS MILESTONE: harness and configuration safety only.
- * The tests below are non-mutating and offline. Real-GitHub
- * create/read/update/conflict/list coverage is task 5.3 and does not
- * exist yet — a green run of this suite is NOT evidence of real-GitHub
- * content integration coverage.
+ * SCOPE: harness and configuration safety only. The tests below are
+ * non-mutating and offline. The real-GitHub content lifecycle
+ * (create/read/update/conflict/list with guaranteed cleanup) lives in
+ * `github-content.test.ts` and is a separate, operator-approved live
+ * suite.
  *
- * The beforeAll/afterAll fetch guard proves this entire run made zero
- * network calls; remove or replace it deliberately when task 5.3 adds
- * live tests (those tests will make real calls by design).
+ * The process-level fetch guard records every network call made from
+ * this Vitest process. The zero-network assertion below is scoped to
+ * the calls made DURING THIS HARNESS BLOCK, so it proves the
+ * harness/configuration validation performs no network I/O without
+ * depending on whether the live suite (which makes real calls by
+ * design) ran earlier in the same process.
  */
 import { execFile } from "node:child_process";
 import path from "node:path";
@@ -50,6 +53,14 @@ afterAll(() => {
 });
 
 describe("task 5.1 integration harness (opt-in suite)", () => {
+  // Number of calls recorded before this block started; the zero-network
+  // assertion only counts calls made during the harness block itself.
+  const fetchCallsAtBlockStart: number[] = [0];
+
+  beforeAll(() => {
+    fetchCallsAtBlockStart[0] = fetchCalls.length;
+  });
+
   it("ran under an explicitly enabled, valid, dedicated-test configuration", () => {
     // The runner (integration/run.mjs) validates before vitest starts;
     // if this fails, the runner failed closed incorrectly.
@@ -132,9 +143,11 @@ describe("task 5.1 integration harness (opt-in suite)", () => {
     expect(fetchCalls.length).toBe(callsBefore);
   });
 
-  it("made zero network calls across the whole task 5.1 run", () => {
-    // The fetch guard installed in beforeAll records every call from this
-    // process. The task 5.1 harness must be fully offline.
-    expect(fetchCalls).toEqual([]);
+  it("made zero network calls during the harness block", () => {
+    // The fetch guard installed in the file-level beforeAll records every
+    // call from this process. The harness/configuration validation must
+    // be fully offline; the live suite's calls (if any) are excluded by
+    // the block-start marker.
+    expect(fetchCalls.slice(fetchCallsAtBlockStart[0])).toEqual([]);
   });
 });
