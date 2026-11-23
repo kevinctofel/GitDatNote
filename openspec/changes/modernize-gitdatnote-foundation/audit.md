@@ -2949,3 +2949,67 @@ These match the established project baseline (828 unit / 29 e2e) from Tasks 4.7/
 ### Outcome
 
 All five required checks and all six supplementary checks completed successfully; the bounded local browser smoke test passed. Task 6.1 is marked `[x]` in `tasks.md`. Tasks 6.2–6.4 were not started. No earlier Task 5.3 acceptance evidence was modified; only this section and the Task 6.1 line in `tasks.md` changed for this assignment.
+
+## Task 6.2 — Setup and Security Documentation
+
+> Recorded 2026-11-23 on branch `feat/gitdatnote-2` at working-tree baseline commit `b635868ec41ca986d13ee5516a0041e6693bc6fe`.
+> Documentation-only: `README.md` was replaced with the GitDatNote 2.0 onboarding guide; `tasks.md` and this audit file were updated. No application source, tests, dependencies, CI, workflow, or configuration files were modified; the credentialed live integration suite was **not** run; no credential was loaded, inspected, or printed.
+
+### Documentation scope
+
+- `README.md` (384 lines) — primary technical onboarding guide with 11 sections: project overview; current implementation status; prerequisites; quick start (local preview without a GitHub App); GitHub App registration; environment variables; starting frontend and backend; available development/test commands; security architecture; troubleshooting; current limitations and next steps.
+- `openspec/changes/modernize-gitdatnote-foundation/tasks.md` — Task 6.2 marked `[x]` with completion evidence.
+- `openspec/changes/modernize-gitdatnote-foundation/audit.md` — this section.
+
+### Source files consulted
+
+`AGENTS.md` (absent — `CLAUDE.md` covers contributor conventions); `README.md` (pre-change); `.env.example`; `package.json`; `vite.config.ts`; `src/server/index.ts`; `src/server/auth/config.ts`, `src/server/auth/routes.ts`, `src/server/auth/github.ts`, `src/server/auth/refresh.ts`; `src/server/session/config.ts`, `src/server/session/cookies.ts`, `src/server/session/crypto.ts`, `src/server/session/storage.ts`; `src/server/middleware/csrf.ts`, `src/server/middleware/logging.ts`, `src/server/middleware/repositoryAuth.ts`; `src/server/content/`; `src/web/markdown.ts`, `src/web/App.tsx`; `integration/README.md`; the three delta specifications (`application-foundation`, `github-connection`, `repository-content`); and the middleware/session test files clarifying exact status codes and error codes.
+
+### Verified configuration behavior and OpenSpec-vs-implementation differences
+
+| Topic | OpenSpec wording | Verified implementation (source of truth) |
+|---|---|---|
+| `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` | Named as environment variables | **Not consumed by the current user-authorization flow**: `auth/github.ts` builds the authorization URL from `GITHUB_APP_CLIENT_ID` only, and the code exchange uses the client ID/secret only. Documented as App-level identity/signing values reserved for App-level operations (e.g. repository creation — out of scope for this change), not required runtime variables. |
+| `.env` handling | "Copy `.env.example`" | `dotenv` is a declared dependency but is **never imported** in `src/`; the server reads `process.env` directly. The README documents explicit shell loading (`set -a; source .env; set +a`) and never claims copying the file alone configures Node. |
+| `SESSION_ENCRYPTION_KEY` | "Required for session storage" | The server **starts** without it (warns `session_storage_unavailable` / `ENC_KEY_MISSING`) but cannot create any session, so auth endpoints fail safely and the app stays disconnected. A malformed key (not 64 hex chars) is rejected by `resolveSessionConfig`; `createApp` catches the storage-initialization failure, logs the sanitized `session_storage_unavailable` warning, and continues serving health and unauthenticated endpoints — only authenticated session functionality remains unavailable. The README states exactly this. |
+| Node runtime | Node.js 24 LTS | Recommended development runtime; `package.json` `engines` is `"node": ">=24"`; Node 26 remains a tested CI runtime. |
+| Cookie `Secure` | Secure cookies in production | `createSessionCookie` (`session/cookies.ts`): `Secure` when `NODE_ENV=production` or `SESSION_COOKIE_SECURE` is `true`/`1`; cookie name `gitdatnote_session`, always `HttpOnly`, `SameSite=Lax`, `Path=/`. |
+| Markdown sanitization | Security section requirement | **Client-side only** (`src/web/markdown.ts`): `marked` (GFM) + DOMPurify default profile plus explicit forbids (`script`, `style`, `iframe`, `object`, `embed`, `form`, `meta`, `base`, `noscript` tags; `style`, `formaction` attributes). The server never renders Markdown. |
+| Callback URL | Registration step | Must exactly match `GITHUB_OAUTH_CALLBACK_URL` (scheme, host, port, path). |
+| Repository permissions | "Required repository permissions" | Verified: **Contents: Read and write** + **Metadata: Read**; no repository-creation permission (the project intentionally cannot create repositories). Access derives from the App installation and repository selection, not traditional OAuth repository scopes. |
+
+### Commands executed (verification battery)
+
+| # | Command | Exit | Result |
+|---|---|---|---|
+| 1 | `npm run lint` | 0 | clean — no output |
+| 2 | `npm run typecheck` | 0 | `tsc --noEmit` over all three projects — 0 errors |
+| 3 | `npm run build` | 0 | vite v6.4.5 — 136 modules transformed; JS 320.07 kB (gzip 101.34 kB) |
+| 4 | `npm run build:server` | 0 | `tsc -p tsconfig.server-build.json` — clean |
+| 5 | `npm test` | 0 | Vitest — **828/828 passed** across 23 test files |
+| 6 | `npm run test:e2e` | 0 | Playwright (Chromium) — **29/29 passed** |
+| 7 | `npm run test:integration:offline` | 0 | offline integration safety suite — **54/54 passed** |
+| 8 | `npm audit` | 0 | found 0 vulnerabilities |
+| 9 | `openspec validate modernize-gitdatnote-foundation` | 0 | valid — 2 pre-existing non-blocking warnings (unchanged since Task 6.1) |
+| 10 | `git diff --check` | 0 | clean — no whitespace errors |
+
+All commands referenced in the README (`dev`, `dev:server`, `build`, `build:server`, `start`, `lint`, `typecheck`, `test`, `test:e2e`, `typecheck:integration`, `test:integration:offline`, `test:integration`) were cross-checked against `package.json` scripts; the real-GitHub suite points readers to `integration/README.md` with explicit opt-in and disposable-repository warnings, and was not executed.
+
+### Local browser smoke test (bounded, unconfigured)
+
+- Confirmed ports 3000/5173 free before launch. Started exactly as documented: `npm run dev:server` and `npm run dev`, no environment configuration.
+- Backend startup log contained only the two expected unconfigured warnings (`session_storage_unavailable` / `ENC_KEY_MISSING`, `auth_not_configured` / `missing_client_id`) plus `server_listening` on 127.0.0.1:3000. `GET /api/health` → 200 `{"status":"ok"}`; `GET /api/session` → 200 `{"connected":false}`. Vite served `http://localhost:5173/` (200).
+- Real browser (Chromium): title "🐴 GitDatNote"; disconnected state displayed ("Not connected to GitHub" with explanation, **Connect GitHub** action, preview affordance). Clicking the preview showed the explicit "Preview — sample data only. This is not a live GitHub connection." banner with the three sample repositories; selecting `sample-org/sample-journal` rendered sample Markdown (heading, list, blockquote) — 0 `script`/`iframe`/`object`/`embed`/`onclick` elements in the preview, no error UI.
+- Total API traffic for the whole smoke test: 4 requests (1 health, 3 session probes), all 200 — zero live GitHub API traffic.
+- Both servers stopped (SIGTERM; backend logged a clean `shutdown` event); ports released afterward.
+
+### Known documentation limitations
+
+- The README contains no real secrets, generated keys, or credentials, by design.
+- The production section is limited to the project's only supported production path (`npm run build`, `npm run build:server`, `NODE_ENV=production npm start`); no unsupported hosting/deployment instructions were added.
+- This browser harness does not directly capture per-navigation console messages (same limitation recorded for Task 6.1); console safety is covered by the 29/29 Playwright e2e suite including "no credentials in DOM/console" assertions.
+- The two unconfigured-state server warnings are expected behavior, not defects.
+
+### Outcome
+
+README.md is now the primary GitDatNote 2.0 onboarding guide covering all required setup and security topics with values verified against source. The full verification battery exited 0; the bounded browser smoke test passed. Task 6.2 is marked `[x]` in `tasks.md`. Tasks 6.3 and 6.4 were not started; the credentialed live GitHub integration suite was not run. No earlier acceptance evidence was modified; only `README.md`, the Task 6.2 line in `tasks.md`, and this audit section changed for this assignment. Unrelated local `.hermes/skills/` modifications and untracked files were preserved untouched. No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `b635868ec41ca986d13ee5516a0041e6693bc6fe`.
