@@ -3013,3 +3013,222 @@ All commands referenced in the README (`dev`, `dev:server`, `build`, `build:serv
 ### Outcome
 
 README.md is now the primary GitDatNote 2.0 onboarding guide covering all required setup and security topics with values verified against source. The full verification battery exited 0; the bounded browser smoke test passed. Task 6.2 is marked `[x]` in `tasks.md`. Tasks 6.3 and 6.4 were not started; the credentialed live GitHub integration suite was not run. No earlier acceptance evidence was modified; only `README.md`, the Task 6.2 line in `tasks.md`, and this audit section changed for this assignment. Unrelated local `.hermes/skills/` modifications and untracked files were preserved untouched. No commit, push, or archive performed; work remains on `feat/gitdatnote-2` at baseline `b635868ec41ca986d13ee5516a0041e6693bc6fe`.
+
+## Task 6.3 — Acceptance Scenario Review (2026-11-23)
+
+> Recorded 2026-11-23 on branch `feat/gitdatnote-2` at commit `e21ab540a2a6f3e810fb7aaafa8cc73a321f942a`.
+> Scope: every acceptance scenario in the three delta specs was reviewed against source and
+> test evidence — `application-foundation` (12 scenarios), `github-connection` (18), and
+> `repository-content` (21), 51 total. The three security gates required by this task were
+> executed fresh: (1) production-repository isolation, (2) browser-bundle credential
+> inspection, (3) server-log confidentiality. Verification only — no application source,
+> tests, dependencies, workflow files, or README changes were introduced. The credentialed
+> live integration suite was **not** run (`GITHUB_INTEGRATION` unset); no
+> `GITHUB_INTEGRATION_TOKEN`, GitHub App secret, or any credential was loaded, inspected,
+> or printed.
+
+### Environment
+
+| Item | Value |
+|---|---|
+| Branch / HEAD | `feat/gitdatnote-2` / `e21ab540a2a6f3e810fb7aaafa8cc73a321f942a` |
+| Working tree (start) | Only the unrelated `.hermes/skills/` modifications (4 modified files, 3 untracked paths) — all preserved, none staged |
+| Node.js / npm | v26.7.0 / 11.19.0 (local; project targets Node 24 LTS — CI matrix verifies 24 and 26) |
+| Environment config | No `.env` present (only `.env.example`); no integration-test flags set |
+
+### Verification battery (re-run 2026-11-23, this task)
+
+| # | Command | Exit | Result |
+|---|---|---|---|
+| 1 | `npm run lint` | 0 | 0 errors, 0 warnings |
+| 2 | `npm run typecheck` | 0 | clean across web + server + integration tsconfig projects |
+| 3 | `npm run build` | 0 | Vite build, fresh `dist/` produced |
+| 4 | `npm run build:server` | 0 | tsc emit to `dist-server/` |
+| 5 | `npm test` | 0 | **828/828 passed** (23 test files) |
+| 6 | `npm run test:e2e` | 0 | **29/29 passed** (Chromium) |
+| 7 | `npm run test:integration:offline` | 0 | **54/54 passed** |
+| 8 | `npm audit` | 0 | **0 vulnerabilities** |
+| 9 | `openspec validate modernize-gitdatnote-foundation` | valid | 2 pre-existing non-blocking style warnings |
+| 10 | `git diff --check` | 0 | clean |
+
+### Gate 1 — Production-repository isolation (SecondBrain / GitDatNote source)
+
+The credentialed integration-test harness cannot target `SecondBrain` or the GitDatNote
+application source repository. This protection belongs to the integration-test workflow
+(`integration/`), not to the application as a whole — the normal GitDatNote content API
+can write to repositories when permitted by both the connected user and the GitHub App
+installation, subject to its separate per-request authorization checks. Harness
+evidence:
+
+- `integration/config.js:48-51` — `RESERVED_REPOSITORY_NAMES = ['secondbrain']`, rejected
+  **case-insensitively** (`config.js:187`, with an explicit rejection message).
+- `integration/config.js:178` — the application source repository `GitDatNote` is rejected
+  as an integration target with an explicit message.
+- `integration/config.js:193` — the target must follow the dedicated
+  `gitdatnote-integration-test[-suffix]` naming convention; naming rules alone are declared
+  insufficient (README: the repository must be dedicated and contain no production data).
+- `integration/safety.ts:210-239` — preflight policy ordering: exact source-repo match →
+  reserved production names → placeholder values → naming convention; content-root and
+  file-name guards additionally reject absolute paths, repository root, `README.md`, and
+  control characters (`safety.ts:73-146`).
+- `integration/run.mjs:7-47` — the live suite runs only when `GITHUB_INTEGRATION` is exactly
+  `"true"` **and** `GITHUB_INTEGRATION_REPO` + `GITHUB_INTEGRATION_TOKEN` are valid;
+  otherwise it is skipped, never fails, and never reads production state.
+- `integration/setup.mjs:55-59` — documented one-time setup: a dedicated repository
+  separate from the application source repository.
+- `integration/setup.mjs:259` — preflight repository-identity check: the GitHub API
+  `full_name` must identify the configured `OWNER/REPO` before any test runs (the
+  runtime identity checks are covered by tests 21–24 of
+  `tests/unit/integration-config.test.ts`).
+- `integration/setup.mjs:118-121` — all test writes go to a unique timestamped run
+  directory `__gitdatnote-integration-<UTC-ISO>/` inside the dedicated repository's
+  content root; cleanup deletes only that directory via the Contents API using the
+  integration token — never through the production API.
+- `integration/cleanup.ts:5-23` — ownership is established from a run-specific marker
+  embedded in each artifact; ownership is verified by exact path + marker before any
+  delete; files whose ownership cannot be established are left untouched; no recursive
+  deletion.
+
+Test evidence: `tests/unit/integration-config.test.ts` (including "the GitDatNote
+application source repository is rejected (test 7)" and "SecondBrain is rejected
+case-insensitively (test 8)") and `integration/safety.test.ts` run offline (in CI) —
+54/54 this run. No production repositories were used for Task 6.3 testing. **Gate 1
+confirmed**: within the integration-test workflow, the credentialed harness rejects
+SecondBrain and the GitDatNote application source repository before any GitHub contact.
+
+### Gate 2 — Browser bundle credential inspection
+
+Fresh builds (`npm run build`, `npm run build:server`) were produced for this audit, then
+scanned with canary patterns: GitHub token prefixes (`ghp_/gho_/ghs_/ghr_/github_pat_`),
+`BEGIN … PRIVATE KEY` headers, `client_secret` value assignments, and inlined
+`process.env` values.
+
+- `dist/` (browser bundle, 328 KB): **zero matches** — no OAuth tokens, private keys,
+  session-encryption material, or inlined environment values.
+- `dist-server/` (server bundle): exactly **one** hit — the literal request-schema key
+  `client_secret:` in the OAuth token-exchange body (`dist-server/server/auth/github.js:84`),
+  whose value is populated at runtime from
+  `env.GITHUB_APP_CLIENT_SECRET?.trim()` (injected env object; environment variable
+  **names** are present as required for runtime lookup, **values** are not inlined).
+- Regression guard: `tests/unit/bundle-secrets.test.ts` (Task 3.7) scans the built bundle
+  for server-only identifiers and passes within `npm test`.
+
+**Gate 2 confirmed**: the production browser bundle contains no credentials.
+
+### Gate 3 — Server log confidentiality
+
+- `src/server/middleware/logging.ts` — request lines log **only** method, a sanitized
+  deterministic route label (fixed label for static routes, fixed template for the
+  parameterized repository content route, fixed fallback for unknown routes — never the raw
+  pathname or query string), status, and duration.
+- `src/server/middleware/errorHandling.ts:9-10` — server-side error logs record just the
+  error **name**; raw messages can embed paths or token-bearing URLs and are deliberately
+  never logged. Client errors use the shared `{code, message, retryable, status}` envelope
+  from `src/shared/errors.ts`.
+- `src/server/middleware/csrf.ts` — CSRF token values, session IDs, cookies, and other
+  credentials are never logged (fixed event names and safe reason codes only); logout is
+  dispatched only after the centralized CSRF boundary (`src/server/index.ts:257`), so
+  logout CSRF failures log through the same fixed-event logging.
+- Full audit of logger call sites in `src/server/` — every call passes a fixed event string
+  or a fixed enum code (`AuthError` codes, `ErrorReason` values, standard error codes);
+  no call site interpolates user-supplied paths, bodies, headers, or token values.
+- Test evidence: `tests/unit/server/security-logging.test.ts` (allowed fields only),
+  `csrf.test.ts:938` ("no secrets in server logs"), `token-refresh.test.ts:1238`
+  ("no credential values appear in HTTP error bodies or server logs on a rejected refresh"),
+  `content-endpoint.test.ts` ("never echoes credentials in fail-closed 500 responses").
+
+**Gate 3 confirmed**: no tokens, session/CSRF identifiers, or file content reach server
+logs; the 29/29 e2e suite exercised this live against the real HTTP server.
+
+### Scenario audit — `application-foundation` (12 scenarios)
+
+| # | Scenario | Source evidence | Test evidence | Verdict |
+|---|---|---|---|---|
+| 1 | New contributor starts locally | `README.md` (Task 6.2): Node 24 LTS, `npm ci`, env table, GitHub App steps; browser bundle carries no secrets (Gate 2) | Gate 2 scan (this run); `bundle-secrets.test.ts` | **Satisfied** |
+| 2 | Frontend and backend run in development | `package.json` scripts `dev` (Vite) and `dev:server` (tsx); Vite `/api` proxy; smoke tests recorded in Tasks 6.1/6.2 | Smoke-test records; e2e suite starts the real servers | **Satisfied** |
+| 3 | CI verifies on supported Node versions | `.github/workflows/ci.yml:35-36` — matrix `node-version: ["24","26"]`, `fail-fast: false`; each leg runs lint → typecheck → test → build → build:server → e2e | CI configuration (legs not re-run locally this task) | **Satisfied** |
+| 4 | Shared code is platform-agnostic | `src/shared/` grepped: zero `document.`/`window.`/`process.`/`require(`/`Buffer.`/`fs.` references; compiled by both `tsconfig.web.json` and `tsconfig.server.json` | `npm run typecheck` exit 0 (both projects); 828/828 unit tests | **Satisfied** |
+| 5 | GitHub is not connected | `auth/routes.ts:332-361` — `/api/session` returns `connected:false` with no session data; content routes fail closed with 401; UI offers Connect GitHub | `auth.test.ts` "returns a consistent disconnected response without a cookie"; e2e connection spec disconnected state | **Satisfied** |
+| 6 | Content operation fails (non-retryable) | `web/components/ApiErrorRecovery.tsx` — `role="alert"` message, no success implied, retry only when `detail.retryable` (line 195) | `content-endpoint.test.ts` conflict/validation failures; e2e `content-api.spec.ts` | **Satisfied** |
+| 7 | Content operation fails (retryable) | `ApiErrorRecovery.tsx:28-29,134` — Retry-After handling, retry offer; `shared/errors.ts:32` — `RATE_LIMITED` retryable; `web/api.ts:167,183` transport failures retryable | `content-adapter.test.ts` rate-limit/5xx mapping; e2e conflict spec | **Satisfied** |
+| 8 | Sanitized preview | `web/markdown.ts` — `marked` + `DOMPurify.sanitize` with an explicit forbids layer; `MarkdownPreview.tsx` never assigns unsanitized output to `innerHTML` | `markdown.test.ts` (unit); `markdown-xss.spec.ts` (e2e) | **Satisfied** |
+| 9 | XSS regression tests exist | — | `tests/unit/web/markdown.test.ts` + `tests/e2e/markdown-xss.spec.ts` — 7 e2e cases: `<script>`, `onerror=`, `<svg onload>`, `javascript:` links, raw `<iframe>`/`<object>`; all pass this run (part of 29/29) | **Satisfied** |
+| 10 | CI on a proposed change | `ci.yml` — every gate (lint, typecheck, unit, build, e2e) is a required job step; failure blocks the change | CI configuration; all gates pass locally this run | **Satisfied** |
+| 11 | Real GitHub integration tests are opt-in | `integration/run.mjs:7-47` — runs only with `GITHUB_INTEGRATION=true` + valid config; `ci.yml` contains **zero** occurrences of `GITHUB_INTEGRATION` — CI never sets the flag | `tests/unit/integration-config.test.ts` (fail-closed config tests) + `integration/safety.test.ts` — offline suite 54/54; live suite skipped by design this run | **Satisfied** |
+| 12 | Dependency security review gate | `npm audit` this run: **0 vulnerabilities** — no high/critical entries remain, so no exceptions are required; prior review recorded in the Task 2.10 section | `npm audit` exit 0 (this run) | **Satisfied** |
+
+### Scenario audit — `github-connection` (18 scenarios)
+
+| # | Scenario | Source evidence | Test evidence | Verdict |
+|---|---|---|---|---|
+| 1 | Successful authorization | `auth/routes.ts` callback — PKCE state verification, token exchange with `offline_access`, profile fetch, encrypted session creation | `auth.test.ts` "completes sign-in: PKCE token exchange, profile fetch, encrypted session creation"; e2e connection spec | **Satisfied** |
+| 2 | Authorization denied or state invalid | `auth/state.ts:9-11,83-87` — one-time state consumption; replayed/expired/invalid state rejected, no session created; safe recovery message + retry in UI | `auth.test.ts` invalid/expired/consumed-state cases | **Satisfied** |
+| 3 | Token revoked or installation removed | `middleware/repositoryAuth.ts` — per-request dual authorization; 401/invalid token → session invalidation; removed installation denied | `authorization.test.ts` "denies when the repository was removed from the App installation"; `token-refresh.test.ts` bad-refresh invalidation; e2e | **Satisfied** |
+| 4 | Access token expires, refresh succeeds | `auth/` refresh service — refresh via stored refresh token, both tokens rotated and re-encrypted, action completed with new token | `token-refresh.test.ts` "rotation succeeds" + completion-with-new-token cases | **Satisfied** |
+| 5 | Refresh token has expired | Refresh service — `bad_refresh_token` → session invalidated, reconnect prompt (no fabricated recovery) | `token-refresh.test.ts` bad-refresh cases | **Satisfied** |
+| 6 | Refresh token is used once | Rotation enforced server-side: new refresh token replaces and invalidates the old (GitHub semantics + encrypted persistence of the rotated pair) | `token-refresh.test.ts` "refresh token rotation is persisted"; consumed-refresh cases | **Satisfied** |
+| 7 | Valid CSRF token | `middleware/csrf.ts` — header-only `X-CSRF-Token`, constant-time compare against session-stored 64-hex token | `csrf.test.ts` "processes the request when the header token matches" | **Satisfied** |
+| 8 | Missing or invalid CSRF token | `csrf.ts` — all state-changing POST/PUT/DELETE incl. `POST /api/auth/logout` rejected `403 CSRF_INVALID`, no state change | `csrf.test.ts` "rejects POST /api/auth/logout without a CSRF token with 403 CSRF_INVALID" + per-verb invalid-token cases | **Satisfied** |
+| 9 | Session survives restart | SQLite file-backed session store (`session/storage.ts`) — sessions persist across close/reopen | `session.test.ts` "persists sessions across database close and reopen" | **Satisfied** |
+| 10 | Cookie is not accessible to scripts | `session-cookies` — `HttpOnly`, `SameSite=Lax`, `Secure` in production, `Path=/` | `session-cookies.test.ts`; e2e connection spec asserts `document.cookie` cannot read the session cookie | **Satisfied** |
+| 11 | Attempted access to an unauthorized repository | `middleware/repositoryAuth.ts:28,179` — denial (any condition) → `403 REPO_NOT_ALLOWED`, no content leaked | `authorization.test.ts` "denies access when the repository is excluded from the installation", other-owner denial | **Satisfied** |
+| 12 | Write to a visible but not writable repository | `auth/github.ts:281-289` — `canRead`/`canWrite` are the effective intersection of user permission and installation permission; write denied when `canWrite` false; UI disables write actions | `authorization.test.ts` read-only denial; e2e read-only repository spec | **Satisfied** |
+| 13 | Repository list is scoped to the user | `auth/routes.ts:415-519` — `GET /api/repositories` returns only accessible repositories with truthful `canRead`/`canWrite` + content root | `auth.test.ts` "returns truthful permissions with the default content root" | **Satisfied** |
+| 14 | Session expires | Max-age check on session probe → `401 UNAUTHORIZED`, reconnect offered, no success implied | `session.test.ts` max-age cases; `web/App.tsx:58-67` probe handling | **Satisfied** |
+| 15 | Disconnect account | `auth/routes.ts:405` logout — session deleted, cookie cleared (Max-Age 0), CSRF token invalidated with it, `204 No Content` | `csrf.test.ts` "deletes the session and clears the cookie with a valid CSRF token (204)"; e2e disconnect spec | **Satisfied** |
+| 16 | Logout invalidates CSRF token | Session row (including CSRF token) deleted on logout; subsequent requests rejected | `csrf.test.ts` "deletes the session and clears the cookie with a valid CSRF token (204)" (post-logout session probe returns `connected:false`) plus the logout 401/403 rejection cases | **Satisfied** |
+| 17 | Browser bundle inspection | Gate 2 (this run): fresh `dist/` scan — zero token/key/env-value matches | `bundle-secrets.test.ts` (in `npm test`); canary scan record above | **Satisfied** |
+| 18 | Server log inspection | Gate 3 (this run): logging middleware + full logger call-site audit — fixed labels/events/codes only | `security-logging.test.ts`, `csrf.test.ts:938`, `token-refresh.test.ts:1238`; live e2e run exercised real logging | **Satisfied** |
+
+### Scenario audit — `repository-content` (21 scenarios)
+
+| # | Scenario | Source evidence | Test evidence | Verdict |
+|---|---|---|---|---|
+| 1 | List content root directory | `content/` list operation under the repository auth boundary; returns name/type/sha/size, no writes | `content-endpoint.test.ts` list cases; e2e content spec | **Satisfied** |
+| 2 | List nested directory | Path resolution `root + relative` (`shared/validate.ts`) | `content-endpoint.test.ts` "resolves a nested directory"; nested `2024/December` cases | **Satisfied** |
+| 3 | Read permitted Markdown file | `readContent` — UTF-8 decode, blob SHA, size; no modification | `content-adapter.test.ts` read cases; `content-endpoint.test.ts` "returns raw UTF-8 Markdown without rendering or sanitizing"; e2e | **Satisfied** |
+| 4 | Read non-existent file | Upstream 404 → `404 FILE_NOT_FOUND` envelope | `content-endpoint.test.ts` 404 mapping; `content-adapter.test.ts` read-missing cases | **Satisfied** |
+| 5 | Reject absolute path | `shared/validate.ts:37-47` — canonicalization rejects absolute/escaping paths **before** any GitHub contact | `content-adapter.test.ts` "absolute path is rejected before GitHub"; `content-endpoint.test.ts` 422 `PATH_INVALID` | **Satisfied** |
+| 6 | Reject traversal path | `validate.ts` — `..` leaving the content root → `PATH_INVALID` | `content-adapter.test.ts` traversal rejection; `content-endpoint.test.ts` "rejects a traversal path with 422 PATH_INVALID" | **Satisfied** |
+| 7 | Reject null byte in path | `validate.ts` — C0 control characters (incl. null) rejected | `content-adapter.test.ts` null-byte case | **Satisfied** |
+| 8 | Allow legitimate nested paths | `validate.ts` — accepted, resolved to `root/…` pair | `content-adapter.test.ts` "accepts a legitimate nested path and resolves it into the content root" | **Satisfied** |
+| 9 | Create new file | `content/index.ts:589-602` — create with operation-derived message; no `author`/`committer` sent | `content-adapter.test.ts` "creates a file with an operation-derived commit message"; e2e lifecycle | **Satisfied** |
+| 10 | Duplicate file | Create against existing target → `409 FILE_EXISTS`, existing file preserved | `content-adapter.test.ts` "duplicate create → read: the collision preserves stored content"; `content-endpoint.test.ts` 409 | **Satisfied** |
+| 11 | Content too large | `shared/validate.ts` — UTF-8 byte length > `MAX_MARKDOWN_BYTES` (1 MiB) → `422 CONTENT_TOO_LARGE`; `index.ts:650,775` reject **before** GitHub | `validate.test.ts:203,221`; `content-adapter.test.ts` multi-byte-over-cap case; `content-endpoint.test.ts` 422 | **Satisfied** |
+| 12 | Successful update | `content/index.ts:664-678` — update with expected SHA, returns new blob SHA | `content-adapter.test.ts` "updates a file with the expected SHA and returns the new SHA"; e2e | **Satisfied** |
+| 13 | Stale version on update | SHA mismatch → `409 SHA_CONFLICT`, newer content preserved, current SHA included | `content-adapter.test.ts` SHA_CONFLICT cases; `content-endpoint.test.ts` conflict spec | **Satisfied** |
+| 14 | Update non-existent file | Missing target → `404 FILE_NOT_FOUND`, no write sent | `content-endpoint.test.ts` "rejects a missing path with 404 FILE_NOT_FOUND without writing"; `content-adapter.test.ts` "rejects updating a missing file (no write sent)" | **Satisfied** |
+| 15 | Non-ASCII content round-trip | UTF-8 encode/decode throughout; no normalization of content | `content-adapter.test.ts` Task 4.6 stateful round-trips (accented/CJK/emoji) + "round-trips Unicode content … exactly" | **Satisfied** |
+| 16 | Default commit message | `content/index.ts:589-590` — `Create {relativePath}` (and `Update {relativePath}`) default | `content-adapter.test.ts` operation-derived message assertions (exact `Create …` text) | **Satisfied** |
+| 17 | Committer identity uses GitHub attribution | `content/index.ts:35-37,602,678` — no `author`/`committer` fields ever sent; GitHub attributes the commit (design decision A-05) | `content-adapter.test.ts` asserts the write payload contains no committer metadata | **Satisfied** |
+| 18 | No hardcoded identity | A-05 — no personal name/email/repo identifiers in commit payloads or source | Same payload-absence assertions; lint/typecheck clean | **Satisfied** |
+| 19 | GitHub API is temporarily unavailable | 5xx/network failure → `502 GITHUB_UNAVAILABLE` (retryable), session preserved; UI reports failure + safe retry guidance | `content-endpoint.test.ts` "maps a GitHub 5xx to 502 GITHUB_UNAVAILABLE and keeps the session valid", network-failure case; `token-refresh.test.ts` upstream_unavailable case | **Satisfied** |
+| 20 | Rate limit | `content/index.ts:144-166` — 429 (or exhausted 403 window) → `RATE_LIMITED` with validated `Retry-After` | `content-adapter.test.ts` rate-limit (429) retryable case; `errors.ts:32,164-166`; e2e | **Satisfied** |
+| 21 | Permission denied | `errors.ts:116,135` — 403 without rate-limit context → `403 REPO_NOT_ALLOWED`, non-retryable | `content-adapter.test.ts` "surfaces a permission denial (403) as a non-retryable error"; `repositoryAuth.ts` boundary tests | **Satisfied** |
+
+### Outcome
+
+All 51 acceptance scenarios across the three delta specs are **satisfied** with source and
+test evidence recorded above. All three Task 6.3 security gates are **confirmed**:
+
+1. The **credentialed integration-test harness** rejects SecondBrain and the GitDatNote
+   application source repository (reserved-name and source-repo rejections, dedicated-repo
+   naming, explicit opt-in, repository-identity preflight, isolated run-directory
+   artifacts, ownership-verified cleanup; offline integration tests 54/54). This
+   protection applies to the integration-test workflow, not the entire application: the
+   normal GitDatNote content API can write to repositories when permitted by both the
+   connected user and the GitHub App installation, subject to its separate authorization
+   checks. No production repositories were used for Task 6.3 testing.
+2. The freshly built browser bundle (`dist/`) contains **no credentials** — the only
+   server-bundle hit is the OAuth request-schema key with a runtime env lookup.
+3. Server logs carry only sanitized route labels, fixed events, and standard error codes —
+   no tokens, session/CSRF identifiers, or file content.
+
+The full verification battery exited 0 (lint, typecheck, both builds, 828/828 unit tests,
+29/29 e2e, 54/54 offline integration, `npm audit` 0 vulnerabilities, `openspec validate`
+valid, `git diff --check` clean). No unresolved issues were found for this task; the
+credentialed live GitHub integration suite remains opt-in and was not run. Task 6.3 is
+marked `[x]` in `tasks.md`. Task 6.4 (unresolved-issue record + archive) is not started. No
+commit, push, or archive performed; work remains on `feat/gitdatnote-2` at
+`e21ab540a2a6f3e810fb7aaafa8cc73a321f942a`. Unrelated local `.hermes/skills/` modifications
+and untracked files were preserved untouched.
