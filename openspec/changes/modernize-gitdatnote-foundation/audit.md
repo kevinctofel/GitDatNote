@@ -2888,3 +2888,64 @@ The SHA from that same ownership-verified response is the only SHA passed to `de
 **Manual cleanup outcome.** The operator manually removed the leftover `integration-article.md` from the first run and confirmed the removal. The operator then explicitly authorized exactly one new live run, which passed with automated cleanup and an independently confirmed clean repository state (see "Live test results" above).
 
 **Status.** Task 5.3 is now `[x]` in `tasks.md`: the authorized live run succeeded and cleanup was both automated and independently confirmed. No further live runs have been initiated.
+
+---
+
+## Task 6.1 — Final Project Verification
+
+> Recorded 2026-11-19 on branch `feat/gitdatnote-2` at commit `def8086749d093b1bada05532b11c4db0cfce441`.
+> Verification and evidence only: every project check was executed locally and a bounded local browser
+> smoke test was performed. No application source, tests, dependencies, workflow files, or README
+> changes were introduced. The credentialed live integration suite was **not** run; no
+> `GITHUB_INTEGRATION_TOKEN`, GitHub App secret, or any credential was loaded, inspected, or printed.
+
+### Environment
+
+| Item | Value |
+|---|---|
+| Branch / HEAD | `feat/gitdatnote-2` / `def8086749d093b1bada05532b11c4db0cfce441` (Task 5.3 commit, matching `origin`) |
+| Working tree (start) | Only the unrelated `.hermes/skills/` modifications (7 entries: 4 modified files and 3 untracked paths) — all preserved, none staged |
+| Node.js / npm | v26.7.0 / 11.19.0 (local; project target Node 24 LTS — CI matrix verifies 24 and 26, see Task 5.3 CI record) |
+| Environment config | No `.env` present (only `.env.example`) — server runs unconfigured/disconnected by design |
+
+### Required checks (Task 6.1)
+
+| # | Command | Exit | Result |
+|---|---|---|---|
+| 1 | `npm run lint` | 0 | clean — no output (ESLint over js/jsx/ts/tsx) |
+| 2 | `npm run typecheck` | 0 | `tsc --noEmit` over all three projects (`tsconfig.web.json`, `tsconfig.server.json`, `tsconfig.integration.json`) — 0 errors |
+| 3 | `npm run build` | 0 | vite v6.4.5 — 136 modules transformed; `dist/index.html` 0.46 kB (gzip 0.30), `dist/assets/index-BkVhv8zZ.css` 2.84 kB (gzip 0.89), `dist/assets/index-YTDMcitM.js` 320.07 kB (gzip 101.34); ✓ built in 584 ms |
+| 4 | `npm test` | 0 | Vitest — **828/828 passed** across 23 test files |
+| 5 | `npm run test:e2e` | 0 | Playwright (Chromium) — **29/29 passed**, 5.5 s, 0 skipped |
+
+These match the established project baseline (828 unit / 29 e2e) from Tasks 4.7/5.2/5.3 — no drift.
+
+### Supplementary checks
+
+| Command | Exit | Result |
+|---|---|---|
+| `npm run build:server` | 0 | `tsc -p tsconfig.server-build.json` — clean, no output |
+| `npm run typecheck:integration` | 0 | `tsc -p tsconfig.integration.json --noEmit` — 0 errors |
+| `npm run test:integration:offline` | 0 | integration offline suite — **54/54 passed** (safety regression tests including the 8 live-cleanup decoder regression tests; no credentials, no network) |
+| `npm audit` | 0 | **found 0 vulnerabilities** |
+| `openspec validate modernize-gitdatnote-foundation` | 0 | valid — 2 pre-existing non-blocking warnings (long requirement text in `github-connection/spec.md`), unrelated to this task |
+| `git diff --check` | 0 | clean — no whitespace errors |
+
+### Local browser smoke test (bounded, unauthenticated)
+
+- Launched `npm run dev:server` (tsx, listening on 127.0.0.1:3000) and `npm run dev` (Vite 6.4.5 on :5173, `/api` proxied to :3000).
+- Server startup log contained only the two warnings expected in an unconfigured deployment — `session_storage_unavailable` (`ENC_KEY_MISSING`) and `auth_not_configured` (`missing_client_id`) — and the server listened normally. `GET /api/session` → 200 `{"connected":false}`.
+- Real browser (Chromium) at `http://localhost:5173/`:
+  - Page loaded (title "🐴 GitDatNote"); the React root rendered content; no uncaught runtime error and no error boundary.
+  - Disconnected state displayed correctly: "Not connected to GitHub" heading, explanation copy, **Connect GitHub** action, and the "Preview the connected layout (sample data)" button.
+  - Preview clicked → explicit "Preview — sample data only. This is not a live GitHub connection." banner with a repository selector listing the three sample repositories (`sample-org/sample-journal` read-only; `sample-org/sample-blog` read+write; `sample-user/private-notes` read+write).
+  - `sample-org/sample-journal` selected → sample note content rendered through the safe Markdown pipeline (heading, list, blockquote) with Access/Visibility metadata.
+  - No GitHub connection was exercised and no placeholder secrets were introduced: the server log shows exactly three `GET /api/session` requests (all 200) for the entire smoke test — no other API traffic; the preview data is entirely client-side fixtures.
+  - No unexpected application errors observed: no error views, no failed resource loads, no server-side error entries.
+- Both dev processes were stopped afterward (server logged a clean SIGTERM shutdown); ports released.
+
+**Limitations:** this browser harness does not directly capture per-navigation console messages; console safety is covered by the 29/29 Playwright e2e suite (including "no credentials in DOM/console" assertions) running the same application against the same development configuration, and by the absence of any error UI or failed request during the smoke test. The two unconfigured-state server warnings are expected behavior, not defects.
+
+### Outcome
+
+All five required checks and all six supplementary checks completed successfully; the bounded local browser smoke test passed. Task 6.1 is marked `[x]` in `tasks.md`. Tasks 6.2–6.4 were not started. No earlier Task 5.3 acceptance evidence was modified; only this section and the Task 6.1 line in `tasks.md` changed for this assignment.
