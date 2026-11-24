@@ -3232,3 +3232,170 @@ marked `[x]` in `tasks.md`. Task 6.4 (unresolved-issue record + archive) is not 
 commit, push, or archive performed; work remains on `feat/gitdatnote-2` at
 `e21ab540a2a6f3e810fb7aaafa8cc73a321f942a`. Unrelated local `.hermes/skills/` modifications
 and untracked files were preserved untouched.
+
+## Task 6.4 — Foundation Closure and Article Editor Follow-ups (2026-11-23)
+
+**Status:** Complete — closure record only. No application source, tests, dependencies, CI, or
+configuration were modified by this task; the only repository changes are this audit section,
+the Task 6.4 completion mark in `tasks.md`, the three new main specifications under
+`openspec/specs/`, and the archive move of this change.
+
+**Baseline:** branch `feat/gitdatnote-2`, `62341068a2fd679010a7d784497a99086b11f0e4`, clean
+working tree at start; Task 6.3 independently accepted; GitHub Actions green on Node.js 24
+and Node.js 26.
+
+### A. Foundation completion summary
+
+The change delivered the intended foundation scope in full (proposal "What changes" vs.
+delivered):
+
+1. **React/Vite/TypeScript frontend** — `src/web/` (App.tsx; six components including
+   `ConnectedView` and `ApiErrorRecovery`; `api.ts`; `markdown.ts`), built with Vite 6.4.5
+   under three tsconfig projects.
+2. **Node.js backend** — `src/server/index.ts` (907 lines) on built-in `node:http`; no web
+   framework.
+3. **GitHub App user authorization** — `src/server/auth/` (OAuth authorization-code + PKCE,
+   `offline_access`, client ID/secret from environment; `GITHUB_APP_ID`/
+   `GITHUB_APP_PRIVATE_KEY` documented as not consumed by the current user-authorization
+   flow).
+4. **Server-managed sessions + encrypted credential storage** — `src/server/session/`
+   (better-sqlite3 + AES-256-GCM under `SESSION_ENCRYPTION_KEY`); HttpOnly/SameSite=Lax
+   `gitdatnote_session` cookie (Secure in production).
+5. **CSRF protection** — header-only `X-CSRF-Token` on all state-changing POST/PUT/DELETE
+   including logout; fail-closed 401/403/500.
+6. **Repository-scoped authorization** — `src/server/middleware/repositoryAuth.ts`: fresh
+   `authorizeRepository` decision per request (read for GET/HEAD, write for state-changing),
+   before any content client is built.
+7. **Token refresh** — `src/server/auth/refresh.ts`, single-flight in-process refresh with
+   safe invalidation/retention semantics.
+8. **Typed GitHub content operations** — `src/server/content/` (`ContentAdapter` over the
+   `ContentClient` seam; production `createAuthenticatedContentClient` on Octokit): list,
+   read, create, update.
+9. **Path validation and SHA-based conflict detection** — `src/shared/validate.ts`
+   (canonicalization, traversal/absolute/null-byte rejection before GitHub), `409
+   SHA_CONFLICT` with `currentSha`, `409 FILE_EXISTS`, `422 PATH_INVALID` /
+   `CONTENT_TOO_LARGE` (1 MiB UTF-8), strict UTF-8 round-trip, no fabricated committer
+   identity (A-05).
+10. **Safe Markdown preview** — client-side `marked` + DOMPurify default profile + deny list
+    (`src/web/markdown.ts`); no server-side rendering.
+11. **Error mapping and retry UI** — `src/shared/errors.ts` (401 → UNAUTHORIZED with session
+    invalidation, 403 → REPO_NOT_ALLOWED, 404 → FILE_NOT_FOUND, 409 → SHA_CONFLICT, 422,
+    429 → RATE_LIMITED with validated Retry-After, network/5xx → GITHUB_UNAVAILABLE);
+    `ApiErrorRecovery` component with countdown/reload behavior.
+12. **Automated tests and CI** — 828/828 Vitest (23 files), 29/29 Playwright e2e, 54/54
+    offline integration, opt-in live integration (61/61 in one authorized run against a
+    dedicated test repo; SecondBrain and source repositories rejected by configuration);
+    CI matrix on Node.js 24 and 26 (`.github/workflows/ci.yml`).
+13. **Developer setup and security documentation** — `README.md` (11 sections): Node 24 LTS
+    prerequisite, all twelve environment variables, GitHub App registration, development
+    and production startup, command table, and security architecture (CSRF, cookies,
+    credential storage, path/size limits, logging, Markdown sanitization).
+
+Verification at close (Task 6.3 battery, final state of this change): lint, typecheck, build,
+build:server, 828/828 unit, 29/29 e2e, 54/54 offline integration, `npm audit` 0
+vulnerabilities, `openspec validate` valid, `git diff --check` clean; GitHub Actions
+passed on Node.js 24 and Node.js 26.
+
+### B. Unresolved foundation issues
+
+No blocking foundation defects identified in the completed acceptance review.
+
+Known non-blocking limitations retained (each recorded in the task audits above):
+
+- Live OAuth/token exchange/refresh against real GitHub credentials was not exercised in
+  this environment (no App credentials); all GitHub-facing behavior is verified against
+  deterministic mocks and canaries. One authorized live integration run passed (61/61)
+  against a dedicated test repository; the credentialed suite remains opt-in
+  (`GITHUB_INTEGRATION=true`).
+- Refresh coordination is in-process single-flight; multi-process deployments sharing one
+  database are not supported (single-process deployment is assumed).
+- `refresh_token_expires_in` defaults to the documented fixed value of 15,897,600 s when
+  GitHub omits it.
+- `Retry-After` is supported only as whole numeric seconds (HTTP-date form unsupported).
+- The complete browser-driven editing conflict flow could not be tested because no article
+  editor exists yet (recorded in Task 5.2); this is a deferred feature, not a defect.
+- The absent article editor is an intentional scope deferral (proposal "Deliberately
+  deferred"; design A-10), not a regression.
+- Two pre-existing non-blocking `openspec validate` length warnings in the github-connection
+  spec carry into the synced main spec.
+- `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY` are not consumed by the current user-authorization
+  flow (App-level JWT/installation-token operations remain a designed, unused path).
+
+Security considerations: single-node deployment assumption (session store + in-process
+refresh); session cookie is Secure only in production; logging carries only sanitized
+labels/events/codes; `npm audit` reports 0 vulnerabilities.
+
+### C. Proposed next OpenSpec change: Article editor
+
+Candidate follow-up areas for the next change (recorded as candidates, validated against
+current source; none implemented by this task):
+
+1. **Article discovery and management** — list existing Markdown articles from an
+   authorized repository and open them. The foundation already provides `GET
+   /api/repos/{owner}/{repo}/content` (directory listing + file reading) with a
+   server-resolved default content root (`DEFAULT_CONTENT_ROOT`, `src/posts`, in
+   `src/shared/types.ts`). Supported draft/published states must not assume how Eleventy
+   implements them: a safe front-matter parser is a prerequisite —
+   `src/shared/frontMatter.ts` is serializer-only by design ("parsing front matter is not
+   required for this task and is intentionally omitted"). Reference conventions from the
+   operator's existing SecondBrain vault (title/description/date/tags front matter;
+   `Articles/*.md` and dated `Journal/` entries) should be verified against the actual
+   target Eleventy configuration, not assumed.
+2. **Writing-focused editor** — the current UI exposes only a labeled sample-data preview
+   (no editing surface; design A-10 defers the editor). Build the writing surface on the
+   existing `ApiErrorRecovery` states (`RATE_LIMITED` countdown, `GITHUB_UNAVAILABLE`
+   retry, `SHA_CONFLICT` reload-latest).
+3. **Content persistence** — reuse the existing `POST`/`PUT` content contract (CSRF header,
+   `expectedSha` round-trip, 1 MiB UTF-8 limit, no fabricated committer identity); do not
+   introduce a parallel write path. Deletion is explicitly out of scope (the API has no
+   delete endpoint).
+4. **Article metadata** — front-matter serialization exists (title/date/description/tags,
+   YAML-safe, deterministic); parsing existing front matter must be added and validated,
+   together with the draft/published state conventions from item 1.
+5. **Design direction** — follow the approved Balanced C + D direction recorded in the
+   in-progress `design-gitdatnote-ui` change (Linear-inspired dashboard + calm writing
+   experience; six accent palettes with Light/Dark/System; WCAG 2.2 AA). That change's
+   decisions should inform — or be merged with — the editor's visual specification.
+6. **Destructive operations** — article deletion and similar destructive flows are
+   explicitly deferred to a later change (the foundation API has no delete endpoint; the UI
+   design change also marks file deletion out of scope).
+7. **Verification** — reuse the established harnesses: Vitest unit/component tests,
+   Playwright browser e2e plus the real-HTTP content API pattern
+   (`tests/e2e/content-api.spec.ts`), and the opt-in live integration suite. The
+   browser-driven editing conflict flow that could not be tested in Task 5.2 becomes
+   testable once the editor exists and should be covered there.
+
+MVP boundary: discovery + open + edit + save (create/update) + conflict handling + safe
+preview. Explicitly later, and not part of the editor change: blog provisioning, Eleventy
+generation/build, GitHub Pages deployment, custom domains, SaaS/multi-tenancy, billing, AI
+features.
+
+This task does not create or implement the next change.
+
+### D. Spec sync and archive record
+
+- The three delta specs were synced to the main specs per the installed OpenSpec sync workflow
+  (`.hermes/skills/openspec-sync-specs`). The main spec tree was empty (all three capabilities
+  are new), so the sync created:
+  - `openspec/specs/application-foundation/spec.md` (6 requirements, 12 scenarios)
+  - `openspec/specs/github-connection/spec.md` (7 requirements, 18 scenarios)
+  - `openspec/specs/repository-content/spec.md` (8 requirements, 21 scenarios)
+  21 requirements and 51 scenarios in total, all carried from the deltas' ADDED requirements.
+- Each delta declares no `## Purpose`, so per the sync workflow each new main spec carries the
+  standard TBD Purpose placeholder. `openspec validate --specs` passes 3/3 with three
+  non-blocking placeholder warnings (the Purpose text must be written directly in each main
+  spec — a delta `## Purpose` is only read when the capability is created, so it cannot
+  replace the placeholder later). Two pre-existing non-blocking length warnings in the
+  github-connection delta carry into the synced main spec verbatim.
+- Task 6.4 was marked complete in `tasks.md`; all 37/37 tasks are complete and
+  `openspec list --json` reports the change status `complete`.
+- The change was archived to `openspec/changes/archive/2026-11-23-modernize-gitdatnote-foundation/`
+  (archive target verified absent before the move; only `design-gitdatnote-ui` remains an
+  active change, untouched).
+- Post-archive verification battery, all exit 0: `openspec list --json` (archived change no
+  longer active), `openspec validate --all` (4 passed, 0 failed), lint, typecheck, build
+  (695 ms), build:server, unit tests **828/828** (23 files), Playwright e2e **29/29** (5.9 s),
+  offline integration **54/54**, `npm audit` 0 vulnerabilities, `git diff --check` clean.
+- No git commit or push was made; the archive and spec-sync changes remain uncommitted on
+  `feat/gitdatnote-2`. The pre-existing unrelated local `.hermes/skills/` modifications and
+  untracked files were preserved untouched.
