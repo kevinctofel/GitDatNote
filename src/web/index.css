@@ -1,5 +1,9 @@
 /* Minimal, accessible shell styling for foundation task 2.5.
- * Basic readability + keyboard focus only — no design system or theme tokens. */
+ * Basic readability + keyboard focus only. The design token foundation
+ * (UI Task 1.1) is imported below; existing hardcoded styles are retained
+ * until later UI tasks migrate them to the tokens. */
+@import "./theme/tokens.css";
+
 * {
   box-sizing: border-box;
 }
