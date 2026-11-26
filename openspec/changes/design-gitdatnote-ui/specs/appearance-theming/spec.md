@@ -30,13 +30,32 @@ The application MUST offer the six approved accent palettes (Lavender default, S
 - **AND** the editor writing surface remains predominantly neutral
 
 ### Requirement: Contrast-safe accent foregrounds
-Small text on accent fills MUST use each palette's `--accent-strong` darkened variant (measured ≥ 4.5:1 with white). The raw accent MUST be reserved for large/bold text, icons, focus rings, and decorative accents.
+Small text on accent fills MUST use the palette's `--accent-strong` variant. Primary-button labels MUST use the `--text-on-accent-strong` token and MUST NOT use `--text-inverse` for this pairing. Accent icons and large text on the app surface MUST use `--accent-on-app`: the raw accent, or the palette's `--accent-strong` in the scoped Clay light-mode exception. The focus ring MUST be the raw accent except in the same scoped Clay light-mode combination, where it MUST be `--accent-strong`.
 
 #### Scenario: Button label contrast
 - **GIVEN** the Clay palette (raw accent `#B68774`)
 - **WHEN** a primary button renders with a normal-size label
 - **THEN** the fill is the `--accent-strong` variant
+- **AND** the label uses `--text-on-accent-strong` (`#FFFFFF`)
 - **AND** the label contrast is at least 4.5:1
+
+#### Scenario: Clay accent foreground on the light app surface
+- **GIVEN** the Clay palette in light mode
+- **WHEN** accent-colored icons or large text render on the light app surface
+- **THEN** `--accent-on-app` resolves to the Clay `--accent-strong` variant (`#926C5D`)
+- **AND** the contrast against the app surface is at least 3:1
+
+#### Scenario: Clay focus ring on the light app surface
+- **GIVEN** the Clay palette in light mode
+- **WHEN** a focus indicator renders adjacent to the light app surface
+- **THEN** the focus ring uses `--accent-strong` rather than the raw accent
+- **AND** the contrast against the app surface is at least 3:1
+
+#### Scenario: Other palettes keep the raw accent
+- **GIVEN** any palette other than Clay, or Clay in dark mode
+- **WHEN** accent-colored icons, large text, or focus rings render on the app surface
+- **THEN** the foreground and focus color is the raw palette accent
+- **AND** the contrast against the app surface is at least 3:1
 
 ### Requirement: Appearance settings screen
 The appearance controls MUST live in an Appearance tab within a Settings hub that retains the global sidebar. The tab MUST present a theme picker (Light/Dark/System) and the six accent swatches, indicate the current selections clearly (text plus outline, not outline only), apply changes immediately to the whole app, and be fully keyboard operable.

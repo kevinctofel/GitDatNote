@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  ACCENT_ON_APP_TOKENS,
   ACCENT_TOKENS,
   DEFAULT_PALETTE,
   LAYOUT_TOKENS,
@@ -13,6 +14,7 @@ import {
   SPACING_TOKENS,
   STATE_TOKENS,
   TYPOGRAPHY_TOKENS,
+  resolveFocusRing,
 } from "../../src/web/theme/tokens";
 
 /**
@@ -125,6 +127,10 @@ describe("tokens.css: required token names exist", () => {
       ...Object.keys(RADIUS_TOKENS),
       ...Object.keys(SHADOW_TOKENS),
       ...Object.keys(LAYOUT_TOKENS),
+      // Task 1.2 semantic tokens (--text-on-accent-strong also arrives
+      // via SHARED_TOKENS, which is a superset of these five maps).
+      "--text-on-accent-strong",
+      "--accent-on-app",
     ]);
     const missing = [...expected].filter((name) => !ALL_TOKENS.has(name));
     expect(missing).toEqual([]);
@@ -286,6 +292,10 @@ describe("tokens.css <-> tokens.ts correspondence", () => {
       ...NEUTRAL_TOKENS.light,
       ...STATE_TOKENS.light,
       ...ACCENT_TOKENS[DEFAULT_PALETTE],
+      // Task 1.2: the base declaration for the semantic foreground token
+      // (--text-on-accent-strong arrives via SHARED_TOKENS). The scoped
+      // Clay light exception lives in the clay palette block instead.
+      "--accent-on-app": "var(--accent)",
     };
     assertValues(lightBlock, rootTokens, ":root");
     assertNoOrphans(lightBlock, new Set(Object.keys(rootTokens)), ":root");
@@ -306,8 +316,22 @@ describe("tokens.css <-> tokens.ts correspondence", () => {
       const cssBlock = blockFor(blocks, selector);
       assertValues(cssBlock, ACCENT_TOKENS[palette], palette);
       if (palette !== DEFAULT_PALETTE) {
-        // Dedicated palette blocks carry exactly the four accent tokens.
-        assertNoOrphans(cssBlock, new Set(Object.keys(ACCENT_TOKENS[palette])), palette);
+        // Dedicated palette blocks carry the four accent tokens — plus,
+        // for Clay only, the Task 1.2 scoped light-exception tokens
+        // (--accent-on-app, --focus-ring), both resolving to the approved
+        // Clay --accent-strong (selector-precedence rules are documented
+        // in the tokens.css header).
+        const allowed = new Set([
+          ...Object.keys(ACCENT_TOKENS[palette]),
+          ...(palette === "clay" ? ["--accent-on-app", "--focus-ring"] : []),
+        ]);
+        assertNoOrphans(cssBlock, allowed, palette);
+        if (palette === "clay") {
+          assertValues(cssBlock, {
+            "--accent-on-app": ACCENT_ON_APP_TOKENS.clay.light,
+            "--focus-ring": resolveFocusRing("clay", "light"),
+          }, "clay scoped light exceptions");
+        }
       }
     }
   });
@@ -332,5 +356,47 @@ describe("tokens.css: theme selector contract", () => {
     expect(normalize(lightBlock.tokens.get("--surface-app") ?? "")).toBe(
       normalize(NEUTRAL_TOKENS.light["--surface-app"]),
     );
+  });
+});
+
+describe("Task 1.2 semantic contrast tokens (design.md §3.1)", () => {
+  it("declares --text-on-accent-strong and --accent-on-app on the :root base", () => {
+    const root = blockFor(blocks, LIGHT_SELECTOR);
+    expect(normalize(root.tokens.get("--text-on-accent-strong") ?? "")).toBe(
+      "#ffffff",
+    );
+    expect(normalize(root.tokens.get("--accent-on-app") ?? "")).toBe(
+      "var(--accent)",
+    );
+  });
+
+  it("matches the TypeScript token maps exactly (all six palettes × both modes)", () => {
+    for (const palette of PALETTES) {
+      // The TS mirrors store the CSS-style var() references (the resolved
+      // hex values are already locked by ACCENT_TOKENS). Clay light is the
+      // one scoped exception: the approved Clay --accent-strong stands in
+      // for the raw accent (raw Clay measures 2.91:1 on the light app
+      // surface, below the 3:1 threshold).
+      const expectedLight =
+        palette === "clay" ? "var(--accent-strong)" : "var(--accent)";
+      expect(ACCENT_ON_APP_TOKENS[palette].light).toBe(expectedLight);
+      // Dark mode never carries the exception: every palette resolves to
+      // the raw accent (the CSS :root base / dark-restoration selectors).
+      expect(ACCENT_ON_APP_TOKENS[palette].dark).toBe("var(--accent)");
+      // --text-on-accent-strong is mode- and palette-independent: the
+      // shared :root declaration is authoritative for both modes.
+      expect(SHARED_TOKENS["--text-on-accent-strong"]).toBe("#FFFFFF");
+    }
+  });
+
+  it("keeps the explicit light selector free of the scoped exception", () => {
+    const block = blockFor(blocks, LIGHT_OVERRIDE_SELECTOR);
+    // No --accent-on-app override here: explicit light inherits the :root
+    // base (var(--accent)); the scoped exception lives in the (0-2-0)
+    // Clay palette block, which applies on top of it for Clay.
+    expect(block.tokens.has("--accent-on-app")).toBe(false);
+    // The light re-declaration keeps the raw-accent focus ring; Clay's
+    // scoped override comes later in source from its palette block.
+    expect(normalize(block.tokens.get("--focus-ring") ?? "")).toBe("var(--accent)");
   });
 });

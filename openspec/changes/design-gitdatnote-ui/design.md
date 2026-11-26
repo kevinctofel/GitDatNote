@@ -44,7 +44,8 @@ From the foundation change and source (observed, not proposed):
 | `--text-primary` | `#201E26` | Headings, primary body text |
 | `--text-secondary` | `#5C5866` | Secondary text, metadata |
 | `--text-tertiary` | `#8A8694` | Captions, placeholders, timestamps |
-| `--text-inverse` | `#F7F6FA` | Text on accent fills |
+| `--text-inverse` | `#F7F6FA` | General-purpose inverse text |
+| `--text-on-accent-strong` | `#FFFFFF` | Primary-button labels on `--accent-strong` (shared token, both modes) |
 
 **Neutral scale (dark mode):**
 | Token | Value |
@@ -58,6 +59,7 @@ From the foundation change and source (observed, not proposed):
 | `--text-secondary` | `#B4B1BD` |
 | `--text-tertiary` | `#827F8C` |
 | `--text-inverse` | `#17161B` |
+| `--text-on-accent-strong` | `#FFFFFF` |
 
 **Accent palettes (approved values, verbatim):**
 
@@ -70,7 +72,7 @@ From the foundation change and source (observed, not proposed):
 | Clay | `#B68774` | `#F8F0EB` |
 | Teal | `#4E9293` | `#EAF5F4` |
 
-**Foreground-on-accent (measured, not assumed).** White text on the raw accent fails WCAG 2.2 AA (4.5:1) for normal-size text on every palette (Lavender 4.08, Sage 3.38, Ocean 3.44, Slate 3.86, Clay 3.13, Teal 3.59). Each palette therefore defines a **`--accent-strong`** — a darkened variant of the approved hue — as the surface for primary actions with white (`--text-inverse` on light mode / dark on dark) labels; every measured ≥ 4.5:1:
+**Foreground-on-accent (measured, not assumed).** White text on the raw accent fails WCAG 2.2 AA (4.5:1) for normal-size text on every palette (Lavender 4.08, Sage 3.38, Ocean 3.44, Slate 3.86, Clay 3.13, Teal 3.59). Each palette therefore defines a **`--accent-strong`** — a darkened variant of the approved hue — as the fill for primary actions, with labels from a dedicated **`--text-on-accent-strong`** token (`#FFFFFF` in both modes); every `--accent-strong` × white combination measures ≥ 4.5:1:
 
 | Palette | `--accent-strong` | White-on-strong contrast |
 |---|---|---|
@@ -81,7 +83,7 @@ From the foundation change and source (observed, not proposed):
 | Clay | `#926C5D` | 4.64 |
 | Teal | `#427C7D` | 4.76 |
 
-Rule: **small text on accent fills uses `--accent-strong`**; the raw `--accent` is used for (a) large/bold text and icons on neutral surfaces (all pass 3:1), (b) focus rings, selected-nav indicators, progress, and decorative accents, and (c) soft-background tints (`--accent-soft` in light mode; a desaturated `--accent-soft-dark` at 12–18% on dark surfaces in dark mode). Accent-colored body-sized text on neutral backgrounds uses `--accent-strong`.
+Rule: **small text on accent fills uses `--accent-strong` with the `--text-on-accent-strong` label** — never the general-purpose `--text-inverse`, which measures below 4.5:1 in 10 of the 12 palette × mode combinations against `--accent-strong`. The raw `--accent` is used for (a) accent-colored large/bold text and icons on neutral surfaces, via the semantic **`--accent-on-app`** token: the raw accent wherever it passes the 3:1 threshold, with one scoped exception — **Clay light mode on the light app surface** `#F7F6FA`, where raw Clay `#B68774` measures 2.91:1 and the approved Clay `--accent-strong` `#926C5D` measures 4.31:1; (b) focus rings — `--focus-ring` is the raw accent in every palette × mode combination except the same scoped Clay light exception, where it uses `--accent-strong` to stay ≥ 3:1 against the light app surface; (c) selected-nav indicators, progress, and decorative accents; and (d) soft-background tints (`--accent-soft` in light mode; a desaturated `--accent-soft-dark` at 12–18% on dark surfaces in dark mode). Accent-colored body-sized text on neutral backgrounds uses `--accent-strong`.
 
 **State colors (per mode, mode-independent hues):**
 | Token | Light | Dark | Use |
@@ -94,9 +96,9 @@ Rule: **small text on accent fills uses `--accent-strong`**; the raw `--accent` 
 | `--warning-soft` | `#F8F0E2` | `#33290F` | Warning banner background |
 | `--disabled-text` | `#A6A3AF` | `#6B6875` | Disabled controls |
 | `--disabled-surface` | `#F0EEE9` | `#26252C` | Disabled control surfaces |
-| `--focus-ring` | `--accent` 2px offset ring | `--accent` 2px offset ring | Keyboard focus indicator |
+| `--focus-ring` | `--accent` 2px offset ring (Clay: `--accent-strong`) | `--accent` 2px offset ring | Keyboard focus indicator |
 
-Hover states: lighten the fill ~8% (light mode) / brighten ~8% (dark mode); focus: 2px `--focus-ring` outline, 2px offset, never border-only (visible in both modes, ≥3:1 against adjacent colors).
+Hover states: lighten the fill ~8% (light mode) / brighten ~8% (dark mode); focus: 2px `--focus-ring` outline, 2px offset, never border-only (visible in both modes, ≥3:1 against adjacent colors at the token level; the scoped Clay light-mode exception resolves via `--accent-strong`; rendered placement, dimensions, and adjacent-background interactions are verified in Task 7.2).
 
 **Editor writing surface:** always neutral (`--surface-panel` / `--text-primary`), regardless of palette or mode — palette accents appear only in chrome (title, status, buttons, focus).
 
@@ -308,7 +310,7 @@ Result is portable Markdown image syntax `![alt](path-or-url)` inserted **at the
 ## 9. Accessibility and responsive acceptance criteria (WCAG 2.2 AA)
 
 1. Full keyboard access: every action reachable and operable by keyboard alone (walkthrough required at acceptance).
-2. Visible focus: 2px accent ring, 2px offset, ≥3:1 against adjacent colors, in both appearance modes.
+2. Visible focus: 2px focus ring (`--focus-ring`), 2px offset, ≥3:1 against adjacent colors, in both appearance modes; the scoped Clay light-mode exception uses `--accent-strong` for the ring (raw Clay accent measures 2.91:1 against the light app surface).
 3. All inputs have accessible labels (visible or `aria-label`); error messages linked via `aria-describedby`.
 4. Text contrast: body text ≥4.5:1, large text ≥3:1 in every palette × mode combination (tokens in §3.1 are constructed to pass; acceptance runs the measured assertions).
 5. Error messages are specific, visible, and actionable (no raw codes to the user).

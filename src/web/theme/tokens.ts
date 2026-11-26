@@ -144,6 +144,47 @@ export const ACCENT_TOKENS: Record<Palette, AccentTokens> = {
   },
 };
 
+/**
+ * Task 1.2 — foreground for accent-colored icons / large text on the app
+ * surface (design.md §3.1). Raw accent in every palette × mode combination
+ * EXCEPT Clay light, where raw Clay #B68774 measures 2.91:1 against the
+ * light app surface #F7F6FA (below the 3:1 token-level threshold); the
+ * approved Clay --accent-strong #926C5D is used there instead (4.31:1).
+ * Mirrors the `--accent-on-app` declarations in tokens.css (base value on
+ * `:root`, scoped override in the Clay palette block).
+ */
+export const ACCENT_ON_APP_TOKENS: Record<Palette, Record<ThemeMode, string>> = {
+  lavender: { light: "var(--accent)", dark: "var(--accent)" },
+  sage: { light: "var(--accent)", dark: "var(--accent)" },
+  ocean: { light: "var(--accent)", dark: "var(--accent)" },
+  slate: { light: "var(--accent)", dark: "var(--accent)" },
+  /* The single scoped exception — see the header above. */
+  clay: { light: "var(--accent-strong)", dark: "var(--accent)" },
+  teal: { light: "var(--accent)", dark: "var(--accent)" },
+};
+
+/**
+ * Task 1.2 — resolved focus-ring color per palette × mode (design.md §3.1).
+ * Raw accent everywhere EXCEPT Clay light (the same measured 2.91:1 failure
+ * against the light app surface); the approved Clay --accent-strong stands
+ * in there. Mirrors `--focus-ring` in tokens.css: the shared state token
+ * stays `var(--accent)` in both modes, the Clay palette block overrides it
+ * for light appearance, and the (0-3-0) explicit-dark / system-dark
+ * selectors restore the raw accent for Clay.
+ */
+export const FOCUS_RING_OVERRIDES: Partial<Record<Palette, Partial<Record<ThemeMode, string>>>> = {
+  clay: { light: "var(--accent-strong)" },
+};
+
+/**
+ * Resolve the focus-ring color for a palette × mode combination.
+ * `var(...)` references are kept as-is: tests resolve them through the
+ * palette token map (see tests/web/contrast.test.ts).
+ */
+export function resolveFocusRing(palette: Palette, mode: ThemeMode): string {
+  return FOCUS_RING_OVERRIDES[palette]?.[mode] ?? "var(--accent)";
+}
+
 /** Font stacks and text scale (design.md §3.2). Mode- and palette-independent. */
 export const TYPOGRAPHY_TOKENS: Record<string, string> = {
   "--font-ui":
@@ -211,4 +252,11 @@ export const SHARED_TOKENS: Record<string, string> = {
   ...RADIUS_TOKENS,
   ...SHADOW_TOKENS,
   ...LAYOUT_TOKENS,
+  /* Task 1.2: dedicated primary-button label foreground on --accent-strong
+     fills (design.md §3.1). White in both modes — measured >= 4.5:1 in all
+     12 palette x mode combinations (4.54-5.00). The general-purpose
+     --text-inverse token is NOT appropriate for this pairing: it measures
+     below 4.5:1 in 10 of the 12 combinations (see
+     tests/web/contrast.test.ts, "regression pairing" describe). */
+  "--text-on-accent-strong": "#FFFFFF",
 };
