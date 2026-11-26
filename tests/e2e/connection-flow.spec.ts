@@ -1,4 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
+import { ACCENT_TOKENS } from "../../src/web/theme/tokens";
+import { contrastRatio } from "../web/contrast";
 
 /**
  * Task 5.2 — browser E2E coverage for the GitHub connection flow.
@@ -528,5 +530,114 @@ test.describe("GitHub connection flow (task 5.2, browser E2E)", () => {
     // repositories or content.
     expect(api.paths.length).toBeGreaterThan(0);
     expect(api.paths.every((p) => p === "/api/session")).toBe(true);
+  });
+});
+
+/**
+ * Task 1.4 contrast correction — browser regression coverage for the
+ * Settings entry button. The entry's label must use the approved Task 1.2
+ * pairing (`--text-on-accent-strong` #FFFFFF on an `--accent-strong` fill
+ * and border), reaching 4.5:1. Hover must NOT change those colors — a
+ * whole-element filter dims the label too and dropped Ocean to ~4.32:1;
+ * the hover lifts the button with the `--shadow-md` token instead.
+ * Selecting a palette in the hub must re-theme the button immediately,
+ * without a reload.
+ */
+/** Expected CSS `rgb()` form of a #RRGGBB hex color. */
+function hexToRgbCss(hex: string): string {
+  const v = hex.replace("#", "");
+  return (
+    `rgb(${parseInt(v.slice(0, 2), 16)}, ` +
+    `${parseInt(v.slice(2, 4), 16)}, ` +
+    `${parseInt(v.slice(4, 6), 16)})`
+  );
+}
+
+/** The entry button's computed label color, fill, border, filter, and shadow. */
+function entryColors(entry: ReturnType<Page["locator"]>): Promise<{
+  background: string;
+  border: string;
+  color: string;
+  filter: string;
+  boxShadow: string;
+}> {
+  return entry.evaluate((el) => {
+    const s = getComputedStyle(el);
+    return {
+      background: s.backgroundColor,
+      border: s.borderTopColor,
+      color: s.color,
+      filter: s.filter,
+      boxShadow: s.boxShadow,
+    };
+  });
+}
+
+test.describe("Settings entry contrast pairing (task 1.4, browser E2E)", () => {
+  test("hover lifts the entry with a shadow, keeps the approved colors, and re-themes immediately on palette change", async ({
+    page,
+  }) => {
+    await routeJson(page, /\/api\/session/, 404, "");
+    await page.goto("/");
+
+    const entry = page.locator(".settings-entry");
+    await expect(entry).toBeVisible();
+
+    // Default palette (lavender), at rest: fill and border must be
+    // --accent-strong, the label must be --text-on-accent-strong (#FFFFFF),
+    // the measured pairing must reach the AA floor, and no filter or
+    // shadow applies.
+    const before = await entryColors(entry);
+    expect(before.filter).toBe("none");
+    expect(before.boxShadow).toBe("none");
+    expect(before.background).toBe(
+      hexToRgbCss(ACCENT_TOKENS.lavender["--accent-strong"]),
+    );
+    expect(before.border).toBe(hexToRgbCss(ACCENT_TOKENS.lavender["--accent-strong"]));
+    expect(before.color).toBe("rgb(255, 255, 255)");
+    expect(
+      contrastRatio("#FFFFFF", ACCENT_TOKENS.lavender["--accent-strong"]),
+      "lavender entry label contrast",
+    ).toBeGreaterThanOrEqual(4.5);
+
+    // Hovered at rest (still lavender): the hover is a --shadow-md lift —
+    // the shadow appears, no filter applies, and the computed label and
+    // fill colors are exactly the approved token values.
+    await entry.hover();
+    const hoveredLavender = await entryColors(entry);
+    expect(hoveredLavender.boxShadow).toMatch(/0px 2px 8px 0px/);
+    expect(hoveredLavender.filter).toBe("none");
+    expect(hoveredLavender.background).toBe(before.background);
+    expect(hoveredLavender.border).toBe(before.border);
+    expect(hoveredLavender.color).toBe("rgb(255, 255, 255)");
+
+    // Open the hub (the Appearance tab is the default) and pick Ocean.
+    await entry.click();
+    await expect(page.locator("#settings-hub")).toBeVisible();
+    await page.getByRole("button", { name: "Ocean" }).click();
+
+    // No reload: the entry must carry Ocean's --accent-strong fill and
+    // border immediately, with the label pairing still above the floor.
+    const after = await entryColors(entry);
+    expect(after.filter).toBe("none");
+    expect(after.boxShadow).toBe("none");
+    expect(after.background).toBe(hexToRgbCss(ACCENT_TOKENS.ocean["--accent-strong"]));
+    expect(after.border).toBe(hexToRgbCss(ACCENT_TOKENS.ocean["--accent-strong"]));
+    expect(after.color).toBe("rgb(255, 255, 255)");
+    expect(
+      contrastRatio("#FFFFFF", ACCENT_TOKENS.ocean["--accent-strong"]),
+      "ocean entry label contrast",
+    ).toBeGreaterThanOrEqual(4.5);
+
+    // Ocean hovered: the hover affordance appears and the computed text
+    // and background colors remain the approved white and Ocean
+    // --accent-strong values — no whole-element dimming.
+    await entry.hover();
+    const hoveredOcean = await entryColors(entry);
+    expect(hoveredOcean.boxShadow).toMatch(/0px 2px 8px 0px/);
+    expect(hoveredOcean.filter).toBe("none");
+    expect(hoveredOcean.background).toBe(after.background);
+    expect(hoveredOcean.border).toBe(after.border);
+    expect(hoveredOcean.color).toBe("rgb(255, 255, 255)");
   });
 });

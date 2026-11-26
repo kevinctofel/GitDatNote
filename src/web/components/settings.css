@@ -1,0 +1,265 @@
+/* Settings hub + Appearance tab (UI Task 1.4).
+   Consumes the Task 1.1/1.2 token foundation only; no hardcoded colors. */
+
+.app-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+/* Clear Settings entry in the existing global header */
+.settings-entry {
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  font-weight: 600;
+  color: var(--text-on-accent-strong);
+  background: var(--accent-strong);
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2) calc(var(--space-1) - 1px);
+  min-height: var(--touch-target-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  cursor: pointer;
+}
+
+/* Hover affordance: lift the button with the existing --shadow-md token.
+   Deliberately NOT a filter — brightness() dims the whole element, white
+   label included, which dropped the Ocean hover pairing to ~4.32:1. The
+   fill (--accent-strong) and label (--text-on-accent-strong) are unchanged,
+   so the approved Task 1.2 pairing holds in every palette and mode.
+   See tests/web/contrast.test.ts (task 1.4 regression). */
+.settings-entry:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.settings {
+  padding: var(--space-4) 0 var(--space-5);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.settings-title {
+  font-size: var(--text-xl);
+  line-height: var(--text-xl-line-height);
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.settings-back {
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  min-height: var(--touch-target-primary);
+  cursor: pointer;
+}
+
+.settings-back:hover {
+  color: var(--text-primary);
+  background: var(--surface-sunken);
+}
+
+/* Horizontal settings navigation (tablist); wraps when narrow */
+.settings-tablist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-5);
+}
+
+.settings-tab {
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: var(--space-2) var(--space-3);
+  min-height: var(--touch-target-primary);
+  min-width: 44px;
+  cursor: pointer;
+}
+
+.settings-tab:hover {
+  color: var(--text-primary);
+}
+
+.settings-tab[aria-selected="true"] {
+  color: var(--accent-on-app);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-panel {
+  min-width: 0;
+}
+
+/* Structural placeholders for the not-yet-implemented tabs */
+.settings-placeholder {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  color: var(--text-secondary);
+}
+
+.settings-placeholder h2 {
+  font-size: var(--text-lg);
+  line-height: var(--text-lg-line-height);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-2);
+}
+
+/* Appearance tab */
+.appearance {
+  max-width: 640px;
+}
+
+.appearance-heading {
+  font-size: var(--text-lg);
+  line-height: var(--text-lg-line-height);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-1);
+}
+
+.appearance-description {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  color: var(--text-secondary);
+  margin: 0 0 var(--space-5);
+}
+
+.appearance-section {
+  margin: 0 0 var(--space-5);
+}
+
+.appearance-section h3 {
+  font-size: var(--text-md);
+  line-height: var(--text-md-line-height);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 var(--space-2);
+}
+
+.accent-hint {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  color: var(--text-tertiary);
+  margin: 0 0 var(--space-3);
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.accent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: var(--space-3);
+}
+
+/* Choice cards: real, labeled buttons */
+.choice {
+  font: inherit;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  background: var(--surface-panel);
+  color: var(--text-secondary);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  min-height: var(--touch-target-primary);
+  cursor: pointer;
+}
+
+.choice:hover {
+  border-color: var(--border-strong);
+}
+
+.choice svg {
+  width: 24px;
+  height: 24px;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.choice-label {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm-line-height);
+  font-weight: 500;
+  color: inherit;
+  text-align: center;
+}
+
+.choice-current {
+  font-size: var(--text-xs);
+  line-height: var(--text-xs-line-height);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Selected state: 2px accent ring + soft accent fill */
+.choice[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.choice[aria-pressed="true"] svg {
+  color: var(--accent-on-app);
+}
+
+/* Selected fill in dark mode (explicit dark + system dark), mirroring the
+   selector contract in tokens.css */
+:root[data-theme="dark"] .choice[aria-pressed="true"] {
+  background: var(--accent-soft-dark);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .choice[aria-pressed="true"] {
+    background: var(--accent-soft-dark);
+  }
+}
+
+/* Accent swatch dot (color comes from the approved palette token values) */
+.swatch-dot {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  flex: none;
+  border: 1px solid var(--border);
+}
+
+/* Visible 2px focus ring with 2px offset, in light and dark modes */
+.settings-entry:focus-visible,
+.settings-back:focus-visible,
+.settings-tab:focus-visible,
+.choice:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}

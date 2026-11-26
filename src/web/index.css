@@ -3,6 +3,7 @@
  * (UI Task 1.1) is imported below; existing hardcoded styles are retained
  * until later UI tasks migrate them to the tokens. */
 @import "./theme/tokens.css";
+@import "./components/settings.css";
 
 * {
   box-sizing: border-box;
@@ -14,17 +15,13 @@ body,
   padding: 0;
 }
 body {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
-    sans-serif;
-  background: #ffffff;
-  color: #1a1a1a;
+  /* App chrome consumes the token foundation (UI Task 1.4) so appearance
+     changes re-theme the whole app, including explicit Light/Dark that
+     differ from the OS preference. */
+  font-family: var(--font-ui);
+  background: var(--surface-app);
+  color: var(--text-primary);
   line-height: 1.5;
-}
-@media (prefers-color-scheme: dark) {
-  body {
-    background: #141414;
-    color: #f2f2f2;
-  }
 }
 
 .app {
@@ -36,26 +33,16 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  border-bottom: 1px solid #d0d0d0;
+  border-bottom: 1px solid var(--border);
   padding-bottom: 0.5rem;
   margin-bottom: 1rem;
-}
-@media (prefers-color-scheme: dark) {
-  .app-header {
-    border-color: #3a3a3a;
-  }
 }
 .app-title {
   font-size: 1.25rem;
   font-weight: 600;
 }
 .session-user {
-  color: #555;
-}
-@media (prefers-color-scheme: dark) {
-  .session-user {
-    color: #b5b5b5;
-  }
+  color: var(--text-secondary);
 }
 h1 {
   font-size: 1.5rem;

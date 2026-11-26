@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import {
   ACCENT_ON_APP_TOKENS,
   ACCENT_TOKENS,
@@ -473,4 +474,105 @@ describe("measured contrast values (recorded evidence)", () => {
     console.log(`\nWCAG contrast matrix (6 palettes × 2 modes × 6 checks):\n${lines.join("\n")}\n`);
     expect(ROWS.length).toBe(72);
   });
+});
+
+/**
+ * Task 1.4 regression guard — Settings entry contrast pairing.
+ *
+ * Parses the ACTUAL `.settings-entry` rule from the component CSS (not the
+ * token values in isolation) and verifies the button's real
+ * foreground/background token pairing is the approved Task 1.2 pairing
+ * (`--text-on-accent-strong` on `--accent-strong`) reaching WCAG AA 4.5:1
+ * across all six palettes and both appearance modes. The token-based hover
+ * shadow and shared 2px focus-ring behavior are asserted preserved.
+ */
+const SETTINGS_CSS = readFileSync(
+  new URL("../../src/web/components/settings.css", import.meta.url),
+  "utf8",
+);
+
+/** Declarations (property → value) of the base `.settings-entry` rule. */
+function settingsEntryRule(): Record<string, string> {
+  // The first `.settings-entry {` occurrence is the base rule; the
+  // `:hover` and `:focus-visible` variants carry different selectors.
+  const match = /\.settings-entry\s*\{([^}]*)\}/.exec(SETTINGS_CSS);
+  if (match === null) {
+    throw new Error("base .settings-entry rule not found in settings.css");
+  }
+  const declarations: Record<string, string> = {};
+  for (const chunk of match[1].split(";")) {
+    const idx = chunk.indexOf(":");
+    if (idx === -1) continue;
+    declarations[chunk.slice(0, idx).trim()] = chunk.slice(idx + 1).trim();
+  }
+  return declarations;
+}
+
+function requireDecl(declarations: Record<string, string>, prop: string): string {
+  const value = declarations[prop];
+  if (value === undefined) {
+    throw new Error(`missing ${prop} declaration in .settings-entry rule`);
+  }
+  return value;
+}
+
+/** The bare `var(--token)` name inside a declaration. */
+function tokenOf(declaration: string): string {
+  const varMatch = /^var\((--[a-z0-9-]+)\)$/.exec(declaration);
+  if (varMatch === null) {
+    throw new Error(`declaration is not a bare token var(): ${declaration}`);
+  }
+  return varMatch[1];
+}
+
+describe("Settings entry contrast pairing (task 1.4 regression)", () => {
+  const ENTRY_RULE = settingsEntryRule();
+
+  it("uses the approved pairing: --text-on-accent-strong label on an --accent-strong fill and border", () => {
+    expect(requireDecl(ENTRY_RULE, "color")).toBe("var(--text-on-accent-strong)");
+    expect(requireDecl(ENTRY_RULE, "background")).toBe("var(--accent-strong)");
+    expect(requireDecl(ENTRY_RULE, "border")).toBe("1px solid var(--accent-strong)");
+  });
+
+  it("hover uses the token-based --shadow-md lift and leaves the approved base pairing untouched; focus ring preserved", () => {
+    // The hover must be a shadow lift — exactly `box-shadow: var(--shadow-md)`
+    // and no filter: a brightness() filter dims the whole element, white
+    // label included, which dropped the Ocean hover pairing to ~4.32:1.
+    const hoverMatch = /\.settings-entry:hover\s*\{([^}]*)\}/.exec(SETTINGS_CSS);
+    if (hoverMatch === null) {
+      throw new Error(".settings-entry:hover rule not found in settings.css");
+    }
+    const hoverDecls: Record<string, string> = {};
+    for (const chunk of hoverMatch[1].split(";")) {
+      const idx = chunk.indexOf(":");
+      if (idx === -1) continue;
+      hoverDecls[chunk.slice(0, idx).trim()] = chunk.slice(idx + 1).trim();
+    }
+    expect(
+      hoverDecls["box-shadow"],
+      "hover must lift with the --shadow-md token",
+    ).toBe("var(--shadow-md)");
+    expect("filter" in hoverDecls, "hover must not apply a filter").toBe(false);
+    // The approved Task 1.2 pairing on the base rule is unchanged.
+    expect(requireDecl(ENTRY_RULE, "color")).toBe("var(--text-on-accent-strong)");
+    expect(requireDecl(ENTRY_RULE, "background")).toBe("var(--accent-strong)");
+    // Shared focus-ring behavior unchanged.
+    expect(SETTINGS_CSS).toMatch(/\.settings-entry:focus-visible/);
+    expect(SETTINGS_CSS).toMatch(
+      /outline:\s*2px solid var\(--focus-ring\);\s*outline-offset:\s*2px;/,
+    );
+  });
+
+  it.each(PALETTES.flatMap((palette) => MODES.map((mode) => ({ palette, mode }))))(
+    "label contrast for $palette/$mode is >= 4.5:1",
+    ({ palette, mode }) => {
+      const tokens = tokenMapFor(palette, mode);
+      const fg = resolveColor(tokenOf(requireDecl(ENTRY_RULE, "color")), tokens);
+      const bg = resolveColor(tokenOf(requireDecl(ENTRY_RULE, "background")), tokens);
+      expect(
+        contrastRatio(fg, bg),
+        `${palette}/${mode}: entry label ${fg} on entry fill ${bg}`,
+      ).toBeGreaterThanOrEqual(4.5);
+    },
+  );
 });
